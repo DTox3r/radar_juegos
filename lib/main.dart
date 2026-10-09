@@ -242,12 +242,12 @@ class GameDealRadarApp extends StatelessWidget {
           surface: Color(0xFF141B26),
           onSurface: Colors.white,
         ),
-        cardTheme: CardTheme(
-          color: const Color(0xFF141B26),
+	cardTheme: const CardThemeData(
+          color: Color(0xFF141B26),
           elevation: 0,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-            side: const BorderSide(color: Color(0xFF1F293D), width: 1),
+            borderRadius: BorderRadius.all(Radius.circular(16)),
+            side: BorderSide(color: Color(0xFF1F293D), width: 1),
           ),
         ),
         appBarTheme: const AppBarTheme(
