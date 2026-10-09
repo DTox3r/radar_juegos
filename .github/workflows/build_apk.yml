@@ -13,6 +13,9 @@ jobs:
       - name: Descargar codigo del repositorio
         uses: actions/checkout@v4
 
+      - name: Respaldar AndroidManifest propio
+        run: cp android/app/src/main/AndroidManifest.xml /tmp/AndroidManifest.xml
+
       - name: Configurar Java 17
         uses: actions/setup-java@v4
         with:
@@ -25,8 +28,11 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Generar scaffolding respetando archivos existentes
+      - name: Generar scaffolding nativo de Android
         run: flutter create . --platforms=android --org com.radargamer --project-name game_deal_radar
+
+      - name: Restaurar AndroidManifest garantizado
+        run: cp /tmp/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
 
       - name: Instalar dependencias
         run: flutter pub get
