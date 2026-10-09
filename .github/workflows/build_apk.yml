@@ -25,8 +25,8 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Reparar plantilla de Android faltante
-        run: flutter create . --platforms=android --org com.radargamer
+      - name: Generar scaffolding respetando archivos existentes
+        run: flutter create . --platforms=android --org com.radargamer --project-name game_deal_radar
 
       - name: Instalar dependencias
         run: flutter pub get
