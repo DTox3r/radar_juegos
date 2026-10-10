@@ -13,8 +13,13 @@ jobs:
       - name: Descargar codigo del repositorio
         uses: actions/checkout@v4
 
-      - name: Respaldar AndroidManifest propio
-        run: cp android/app/src/main/AndroidManifest.xml /tmp/AndroidManifest.xml
+      - name: Respaldar archivos nativos propios
+        run: |
+          mkdir -p /tmp/backup
+          cp android/app/src/main/AndroidManifest.xml /tmp/backup/AndroidManifest.xml
+          if [ -f android/app/src/main/kotlin/com/radargamer/game_deal_radar/MainActivity.kt ]; then
+            cp android/app/src/main/kotlin/com/radargamer/game_deal_radar/MainActivity.kt /tmp/backup/MainActivity.kt
+          fi
 
       - name: Configurar Java 17
         uses: actions/setup-java@v4
@@ -31,8 +36,15 @@ jobs:
       - name: Generar scaffolding nativo de Android
         run: flutter create . --platforms=android --org com.radargamer --project-name game_deal_radar
 
-      - name: Restaurar AndroidManifest garantizado
-        run: cp /tmp/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+      - name: Restaurar archivos nativos garantizados
+        run: |
+          cp /tmp/backup/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          mkdir -p android/app/src/main/kotlin/com/radargamer/game_deal_radar
+          if [ -f /tmp/backup/MainActivity.kt ]; then
+            cp /tmp/backup/MainActivity.kt android/app/src/main/kotlin/com/radargamer/game_deal_radar/MainActivity.kt
+          else
+            echo -e "package com.radargamer.game_deal_radar\n\nimport io.flutter.embedding.android.FlutterActivity\n\nclass MainActivity: FlutterActivity() {\n}" > android/app/src/main/kotlin/com/radargamer/game_deal_radar/MainActivity.kt
+          fi
 
       - name: Configurar Desugaring correctamente en Gradle
         run: |
