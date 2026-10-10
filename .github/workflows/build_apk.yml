@@ -34,15 +34,28 @@ jobs:
       - name: Restaurar AndroidManifest garantizado
         run: cp /tmp/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
 
-      - name: Habilitar Desugaring en Gradle
+      - name: Configurar Desugaring correctamente en Gradle
         run: |
-          if [ -f android/app/build.gradle.kts ]; then
-            sed -i '/compileOptions {/a \        isCoreLibraryDesugaringEnabled = true' android/app/build.gradle.kts
-            sed -i '/dependencies {/a \    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")' android/app/build.gradle.kts
-          elif [ -f android/app/build.gradle ]; then
-            sed -i '/compileOptions {/a \        coreLibraryDesugaringEnabled true' android/app/build.gradle
-            sed -i '/dependencies {/a \    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"' android/app/build.gradle
-          fi
+          python3 -c "
+          for path in ['android/app/build.gradle.kts', 'android/app/build.gradle']:
+              try:
+                  with open(path, 'r') as f:
+                      content = f.read()
+                  if 'build.gradle.kts' in path:
+                      if 'isCoreLibraryDesugaringEnabled' not in content:
+                          content = content.replace('compileOptions {', 'compileOptions {\n        isCoreLibraryDesugaringEnabled = true')
+                      content += '\ndependencies {\n    coreLibraryDesugaring(\"com.android.tools:desugar_jdk_libs:2.0.4\")\n}\n'
+                  else:
+                      if 'coreLibraryDesugaringEnabled' not in content:
+                          content = content.replace('compileOptions {', 'compileOptions {\n        coreLibraryDesugaringEnabled true')
+                      content += '\ndependencies {\n    coreLibraryDesugaring \"com.android.tools:desugar_jdk_libs:2.0.4\"\n}\n'
+                  with open(path, 'w') as f:
+                      f.write(content)
+                  print(f'Configurado exitosamente en {path}')
+                  break
+              except FileNotFoundError:
+                  continue
+          "
 
       - name: Instalar dependencias
         run: flutter pub get
