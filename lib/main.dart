@@ -122,19 +122,22 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
   late TabController _tabController;
   double _vesRate = 0.0;
   bool _isLoadingRate = true;
-  String _region = 'LATAM';
+  String _region = 'LATAM'; // 'LATAM' => cc=ve, 'USA' => cc=us
   Map<String, String> _storesMap = {};
 
   List<Map<String, dynamic>> _followedGames = [];
   List<Map<String, dynamic>> _deals = [];
   bool _isLoadingDeals = true;
 
+  List<Map<String, dynamic>> _freebies = [];
+  bool _isLoadingFreebies = true;
+
   final NumberFormat _currencyFormat = NumberFormat('#,##0.00', 'es_VE');
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(length: 3, vsync: this);
     _requestNotificationPermissions();
     _initializeData();
   }
@@ -151,6 +154,7 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
     await Future.wait([
       _fetchBinanceRate(),
       _fetchDeals(),
+      _fetchFreebies(),
       _refreshFollowed(),
     ]);
   }
@@ -189,6 +193,7 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('saved_region', region);
     setState(() => _region = region);
+    _handleRefreshAll();
   }
 
   Future<void> _fetchBinanceRate() async {
@@ -251,7 +256,7 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
     setState(() => _isLoadingDeals = true);
     try {
       final res = await http.get(Uri.parse(
-          'https://www.cheapshark.com/api/1.0/deals?storeID=1,2,3,7,11,25,31&pageSize=30&sortBy=Deal%20Rating'));
+          'https://www.cheapshark.com/api/1.0/deals?storeID=1,2,3,7,11,25,31&pageSize=35&sortBy=Deal%20Rating'));
       if (res.statusCode == 200) {
         final List list = jsonDecode(res.body);
         setState(() {
@@ -262,6 +267,91 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
       }
     } catch (_) {}
     setState(() => _isLoadingDeals = false);
+  }
+
+  Future<void> _fetchFreebies() async {
+    setState(() => _isLoadingFreebies = true);
+    try {
+      final res = await http.get(Uri.parse('https://www.gamerpower.com/api/giveaways?type=game'));
+      if (res.statusCode == 200) {
+        final List list = jsonDecode(res.body);
+        setState(() {
+          _freebies = list.cast<Map<String, dynamic>>();
+          _isLoadingFreebies = false;
+        });
+        return;
+      }
+    } catch (_) {}
+    setState(() => _isLoadingFreebies = false);
+  }
+
+  Future<Map<String, dynamic>?> _fetchSteamDetails(String steamAppID) async {
+    try {
+      final countryCode = _region == 'LATAM' ? 've' : 'us';
+      final url = Uri.parse(
+          'https://store.steampowered.com/api/appdetails?appids=$steamAppID&cc=$countryCode');
+      final res = await http.get(url);
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        if (data[steamAppID]?['success'] == true) {
+          final gameData = data[steamAppID]['data'];
+          final priceOverview = gameData['price_overview'];
+          final dlcs = (gameData['dlc'] as List?)?.cast<int>() ?? [];
+
+          double finalPrice = 0.0;
+          double regularPrice = 0.0;
+          int discount = 0;
+
+          if (priceOverview != null) {
+            finalPrice = (priceOverview['final'] as int? ?? 0) / 100.0;
+            regularPrice = (priceOverview['initial'] as int? ?? 0) / 100.0;
+            discount = priceOverview['discount_percent'] as int? ?? 0;
+          }
+
+          return {
+            'price': finalPrice,
+            'regular': regularPrice,
+            'discount': discount,
+            'dlc_ids': dlcs,
+          };
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<List<Map<String, dynamic>>> _fetchSteamDlcs(List<int> dlcIds) async {
+    if (dlcIds.isEmpty) return [];
+    final countryCode = _region == 'LATAM' ? 've' : 'us';
+    final List<Map<String, dynamic>> results = [];
+
+    // Limitar a los primeros 6 DLCs para consultas rápidas y fluidas
+    final topDlcs = dlcIds.take(6).toList();
+
+    for (var id in topDlcs) {
+      try {
+        final url = Uri.parse(
+            'https://store.steampowered.com/api/appdetails?appids=$id&cc=$countryCode&filters=basic,price_overview');
+        final res = await http.get(url);
+        if (res.statusCode == 200) {
+          final data = jsonDecode(res.body);
+          if (data['$id']?['success'] == true) {
+            final item = data['$id']['data'];
+            final po = item['price_overview'];
+            if (po != null) {
+              results.add({
+                'id': id,
+                'name': item['name'] ?? 'DLC #$id',
+                'price': (po['final'] as int? ?? 0) / 100.0,
+                'regular': (po['initial'] as int? ?? 0) / 100.0,
+                'discount': po['discount_percent'] as int? ?? 0,
+              });
+            }
+          }
+        }
+      } catch (_) {}
+    }
+    return results;
   }
 
   void _triggerNotificationWithSound(String title, String body) async {
@@ -292,25 +382,34 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
           final data = jsonDecode(res.body);
           final deals = data['deals'] as List? ?? [];
           final cheapestEver = data['cheapestPriceEver'] as Map<String, dynamic>?;
+          final steamAppID = data['info']?['steamAppID']?.toString();
 
           if (deals.isNotEmpty) {
-            final best = deals.first;
-            final prevPrice = double.tryParse(g['salePrice'].toString()) ?? 0.0;
-            final currPrice = double.tryParse(best['price'].toString()) ?? 0.0;
+            var best = deals.first;
+            double currentBestPrice = double.tryParse(best['price'].toString()) ?? 0.0;
 
-            if (currPrice < prevPrice && prevPrice > 0) {
+            if (steamAppID != null && steamAppID.isNotEmpty && steamAppID != 'null') {
+              final steamData = await _fetchSteamDetails(steamAppID);
+              if (steamData != null && steamData['price'] > 0 && steamData['price'] < currentBestPrice) {
+                currentBestPrice = steamData['price'];
+              }
+            }
+
+            final prevPrice = double.tryParse(g['salePrice'].toString()) ?? 0.0;
+            if (currentBestPrice < prevPrice && prevPrice > 0) {
               droppedGameTitle = data['info']['title'];
-              droppedPrice = currPrice;
+              droppedPrice = currentBestPrice;
             }
 
             updated.add({
               'gameID': g['gameID'],
               'title': data['info']['title'],
               'thumb': data['info']['thumb'],
-              'salePrice': best['price'],
+              'salePrice': currentBestPrice.toStringAsFixed(2),
               'normalPrice': best['retailPrice'],
               'storeID': best['storeID'],
               'dealID': best['dealID'],
+              'steamAppID': steamAppID,
               'historicalLow': cheapestEver?['price'] ?? best['price'],
               'historicalDate': cheapestEver?['date'] ?? 0,
             });
@@ -327,7 +426,7 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
     if (droppedGameTitle != null && mounted) {
       _triggerNotificationWithSound(
         '🔥 ¡Oferta en $droppedGameTitle!',
-        'El juego bajó a \$$droppedPrice en tiendas oficiales.',
+        'El juego bajó a \$$droppedPrice en tienda oficial.',
       );
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -360,6 +459,7 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
     await Future.wait([
       _fetchBinanceRate(),
       _fetchDeals(),
+      _fetchFreebies(),
       _refreshFollowed(),
     ]);
   }
@@ -386,6 +486,7 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
             final data = jsonDecode(snapshot.data!.body);
             final deals = (data['deals'] as List? ?? []).cast<Map<String, dynamic>>();
             final cheapestEver = data['cheapestPriceEver'] as Map<String, dynamic>?;
+            final steamAppID = data['info']?['steamAppID']?.toString();
 
             final lowestPrice = cheapestEver?['price'] != null
                 ? double.tryParse(cheapestEver!['price'].toString()) ?? 0.0
@@ -397,125 +498,277 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
 
             return Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Center(
-                    child: Container(
-                      width: 40,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: Colors.white24,
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(context).size.height * 0.85,
+                ),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: Image.network(
-                          thumb,
-                          width: 65,
-                          height: 38,
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, __, ___) => const Icon(Icons.videogame_asset),
+                      Center(
+                        child: Container(
+                          width: 40,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: Colors.white24,
+                            borderRadius: BorderRadius.circular(2),
+                          ),
                         ),
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          title,
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: Image.network(
+                              thumb,
+                              width: 65,
+                              height: 38,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, __, ___) => const Icon(Icons.videogame_asset),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              title,
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF0B0F17),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: const Color(0xFF1F293D)),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Row(
+                      const SizedBox(height: 14),
+
+                      // Histórico Mínimo Registrado
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF0B0F17),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: const Color(0xFF1F293D)),
+                        ),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
-                            const Icon(Icons.history, color: Color(0xFF00F5A0), size: 18),
-                            const SizedBox(width: 8),
+                            Row(
+                              children: [
+                                const Icon(Icons.history, color: Color(0xFF00F5A0), size: 18),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Mínimo histórico: \$${lowestPrice.toStringAsFixed(2)}',
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                ),
+                              ],
+                            ),
                             Text(
-                              'Mínimo histórico: \$${lowestPrice.toStringAsFixed(2)}',
-                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                              '($lowestDateStr)',
+                              style: const TextStyle(color: Colors.white54, fontSize: 12),
                             ),
                           ],
                         ),
-                        Text(
-                          '($lowestDateStr)',
-                          style: const TextStyle(color: Colors.white54, fontSize: 12),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Precios por tienda disponible:',
-                    style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 8),
-                  ConstrainedBox(
-                    constraints: BoxConstraints(
-                      maxHeight: MediaQuery.of(context).size.height * 0.42,
-                    ),
-                    child: ListView.separated(
-                      shrinkWrap: true,
-                      itemCount: deals.length,
-                      separatorBuilder: (_, __) => const Divider(color: Color(0xFF1F293D)),
-                      itemBuilder: (_, idx) {
-                        final d = deals[idx];
-                        final storeName = _storesMap[d['storeID'].toString()] ?? 'Tienda #${d['storeID']}';
-                        final price = double.tryParse(d['price'].toString()) ?? 0.0;
-                        final priceVes = price * _vesRate;
-                        final retail = double.tryParse(d['retailPrice'].toString()) ?? 0.0;
-                        final savings = double.tryParse(d['savings'].toString()) ?? 0.0;
+                      ),
 
-                        return ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          title: Text(storeName, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
-                          subtitle: Text(
-                            'Bs. ${_currencyFormat.format(priceVes)}' +
-                                (savings > 0 ? ' • Regular: \$$retail' : ''),
-                            style: const TextStyle(color: Color(0xFF00F5A0), fontSize: 12),
-                          ),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                '\$${price.toStringAsFixed(2)}',
-                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-                              ),
-                              const SizedBox(width: 8),
-                              IconButton(
-                                icon: const Icon(Icons.open_in_new, color: Color(0xFF00D2FF), size: 20),
-                                onPressed: () {
-                                  final dealUrl = 'https://www.cheapshark.com/redirect?dealID=${d['dealID']}';
-                                  launchUrl(Uri.parse(dealUrl), mode: LaunchMode.externalApplication);
-                                },
-                              ),
-                            ],
-                          ),
-                        );
-                      },
-                    ),
+                      // Steam Regional y Sección de DLCs
+                      if (steamAppID != null && steamAppID.isNotEmpty && steamAppID != 'null')
+                        FutureBuilder<Map<String, dynamic>?>(
+                          future: _fetchSteamDetails(steamAppID),
+                          builder: (ctx, steamSnap) {
+                            if (!steamSnap.hasData || steamSnap.data == null) {
+                              return const SizedBox.shrink();
+                            }
+                            final sPrice = steamSnap.data!['price'] as double;
+                            final sDisc = steamSnap.data!['discount'] as int;
+                            final sVes = sPrice * _vesRate;
+                            final dlcIds = (steamSnap.data!['dlc_ids'] as List<int>?) ?? [];
+
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Container(
+                                  margin: const EdgeInsets.only(top: 8),
+                                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF1B2838),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(color: const Color(0xFF66C0F4).withOpacity(0.4)),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      const Icon(Icons.verified, color: Color(0xFF66C0F4), size: 18),
+                                      const SizedBox(width: 8),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              'Steam (${_region == 'LATAM' ? 'Precio Regional VE' : 'Precio USA'}):',
+                                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Color(0xFF66C0F4)),
+                                            ),
+                                            Text(
+                                              'Bs. ${_currencyFormat.format(sVes)}' +
+                                                  (sDisc > 0 ? ' (-$sDisc%)' : ''),
+                                              style: const TextStyle(color: Colors.white70, fontSize: 11),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      Text(
+                                        '\$${sPrice.toStringAsFixed(2)}',
+                                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Color(0xFF00F5A0)),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      IconButton(
+                                        icon: const Icon(Icons.open_in_new, color: Color(0xFF66C0F4), size: 18),
+                                        onPressed: () {
+                                          launchUrl(Uri.parse('https://store.steampowered.com/app/$steamAppID'),
+                                              mode: LaunchMode.externalApplication);
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ),
+
+                                // Listado de DLCs / Expansiones
+                                if (dlcIds.isNotEmpty) ...[
+                                  const SizedBox(height: 12),
+                                  Text(
+                                    'Expansiones / DLCs (${dlcIds.length} disponibles):',
+                                    style: const TextStyle(color: Color(0xFF66C0F4), fontSize: 13, fontWeight: FontWeight.bold),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  FutureBuilder<List<Map<String, dynamic>>>(
+                                    future: _fetchSteamDlcs(dlcIds),
+                                    builder: (ctx, dlcSnap) {
+                                      if (!dlcSnap.hasData) {
+                                        return const Padding(
+                                          padding: EdgeInsets.symmetric(vertical: 8),
+                                          child: Center(
+                                            child: SizedBox(
+                                              width: 20,
+                                              height: 20,
+                                              child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF66C0F4)),
+                                            ),
+                                          ),
+                                        );
+                                      }
+                                      final dlcList = dlcSnap.data!;
+                                      if (dlcList.isEmpty) {
+                                        return const Text('Consultar complementos directamente en Steam',
+                                            style: TextStyle(color: Colors.white38, fontSize: 11));
+                                      }
+
+                                      return Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                        decoration: BoxDecoration(
+                                          color: const Color(0xFF0B0F17),
+                                          borderRadius: BorderRadius.circular(10),
+                                          border: Border.all(color: const Color(0xFF1F293D)),
+                                        ),
+                                        child: Column(
+                                          children: dlcList.map((d) {
+                                            final dPrice = d['price'] as double;
+                                            final dVes = dPrice * _vesRate;
+                                            return Padding(
+                                              padding: const EdgeInsets.symmetric(vertical: 4),
+                                              child: Row(
+                                                children: [
+                                                  const Icon(Icons.extension, color: Color(0xFF66C0F4), size: 14),
+                                                  const SizedBox(width: 8),
+                                                  Expanded(
+                                                    child: Text(
+                                                      d['name'],
+                                                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+                                                      maxLines: 1,
+                                                      overflow: TextOverflow.ellipsis,
+                                                    ),
+                                                  ),
+                                                  Text(
+                                                    '\$${dPrice.toStringAsFixed(2)}',
+                                                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF00F5A0)),
+                                                  ),
+                                                  const SizedBox(width: 6),
+                                                  Text(
+                                                    '(Bs. ${_currencyFormat.format(dVes)})',
+                                                    style: const TextStyle(fontSize: 10, color: Colors.white38),
+                                                  ),
+                                                  IconButton(
+                                                    padding: EdgeInsets.zero,
+                                                    constraints: const BoxConstraints(),
+                                                    icon: const Icon(Icons.open_in_new, color: Color(0xFF00D2FF), size: 14),
+                                                    onPressed: () {
+                                                      launchUrl(Uri.parse('https://store.steampowered.com/app/${d['id']}'),
+                                                          mode: LaunchMode.externalApplication);
+                                                    },
+                                                  ),
+                                                ],
+                                              ),
+                                            );
+                                          }).toList(),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ],
+                              ],
+                            );
+                          },
+                        ),
+
+                      const SizedBox(height: 14),
+                      const Text(
+                        'Precios por tienda autorizada (CheapShark):',
+                        style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold),
+                      ),
+                      const SizedBox(height: 8),
+                      ListView.separated(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        itemCount: deals.length,
+                        separatorBuilder: (_, __) => const Divider(color: Color(0xFF1F293D)),
+                        itemBuilder: (_, idx) {
+                          final d = deals[idx];
+                          final storeName = _storesMap[d['storeID'].toString()] ?? 'Tienda #${d['storeID']}';
+                          final price = double.tryParse(d['price'].toString()) ?? 0.0;
+                          final priceVes = price * _vesRate;
+                          final retail = double.tryParse(d['retailPrice'].toString()) ?? 0.0;
+                          final savings = double.tryParse(d['savings'].toString()) ?? 0.0;
+
+                          return ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: Text(storeName, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+                            subtitle: Text(
+                              'Bs. ${_currencyFormat.format(priceVes)}' +
+                                  (savings > 0 ? ' • Regular: \$$retail' : ''),
+                              style: const TextStyle(color: Color(0xFF00F5A0), fontSize: 12),
+                            ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  '\$${price.toStringAsFixed(2)}',
+                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                                ),
+                                const SizedBox(width: 8),
+                                IconButton(
+                                  icon: const Icon(Icons.open_in_new, color: Color(0xFF00D2FF), size: 20),
+                                  onPressed: () {
+                                    final dealUrl = 'https://www.cheapshark.com/redirect?dealID=${d['dealID']}';
+                                    launchUrl(Uri.parse(dealUrl), mode: LaunchMode.externalApplication);
+                                  },
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 14),
+                    ],
                   ),
-                  const SizedBox(height: 10),
-                ],
+                ),
               ),
             );
           },
@@ -643,7 +896,7 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
                               ),
                               alignment: Alignment.center,
                               child: const Text(
-                                '🇻🇪 LATAM-USD',
+                                '🇻🇪 LATAM-USD (cc=ve)',
                                 style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
                               ),
                             ),
@@ -662,7 +915,7 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
                               ),
                               alignment: Alignment.center,
                               child: const Text(
-                                '🇺🇸 USA (Global)',
+                                '🇺🇸 USA Global (cc=us)',
                                 style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
                               ),
                             ),
@@ -688,6 +941,10 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
               const Tab(
                 icon: const Icon(Icons.local_fire_department, size: 20),
                 text: 'Top Gangas',
+              ),
+              Tab(
+                icon: const Icon(Icons.card_giftcard, size: 20),
+                text: 'Gratis (${_freebies.length})',
               ),
             ],
           ),
@@ -769,6 +1026,91 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
                             );
                           },
                         ),
+                ),
+                RefreshIndicator(
+                  color: const Color(0xFF00D2FF),
+                  backgroundColor: const Color(0xFF141B26),
+                  onRefresh: _handleRefreshAll,
+                  child: _isLoadingFreebies
+                      ? const Center(child: CircularProgressIndicator(color: Color(0xFF00D2FF)))
+                      : _freebies.isEmpty
+                          ? ListView(
+                              children: const [
+                                SizedBox(height: 120),
+                                Center(
+                                  child: Text('No hay juegos gratis reportados en este momento',
+                                      style: TextStyle(color: Colors.white54)),
+                                )
+                              ],
+                            )
+                          : ListView.builder(
+                              padding: const EdgeInsets.only(top: 8, bottom: 80, left: 12, right: 12),
+                              itemCount: _freebies.length,
+                              itemBuilder: (ctx, i) {
+                                final f = _freebies[i];
+                                final originalPrice = f['worth'] ?? 'N/A';
+                                final platform = f['platforms'] ?? 'PC';
+                                final giveawayUrl = f['open_giveaway_url'] ?? '';
+
+                                return Card(
+                                  margin: const EdgeInsets.symmetric(vertical: 6),
+                                  child: ListTile(
+                                    contentPadding: const EdgeInsets.all(12),
+                                    leading: ClipRRect(
+                                      borderRadius: BorderRadius.circular(8),
+                                      child: Image.network(
+                                        f['image'] ?? '',
+                                        width: 70,
+                                        height: 42,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (_, __, ___) => const Icon(Icons.card_giftcard),
+                                      ),
+                                    ),
+                                    title: Text(
+                                      f['title'] ?? '',
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    subtitle: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        const SizedBox(height: 4),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFF00D2FF).withOpacity(0.15),
+                                            borderRadius: BorderRadius.circular(4),
+                                          ),
+                                          child: Text(
+                                            platform,
+                                            style: const TextStyle(color: Color(0xFF00D2FF), fontSize: 10, fontWeight: FontWeight.bold),
+                                          ),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          'Antes: $originalPrice',
+                                          style: const TextStyle(color: Colors.white38, fontSize: 11, decoration: TextDecoration.lineThrough),
+                                        ),
+                                      ],
+                                    ),
+                                    trailing: ElevatedButton(
+                                      style: ElevatedButton.styleFrom(
+                                        backgroundColor: const Color(0xFF00F5A0),
+                                        foregroundColor: Colors.black,
+                                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                      ),
+                                      onPressed: () {
+                                        if (giveawayUrl.isNotEmpty) {
+                                          launchUrl(Uri.parse(giveawayUrl), mode: LaunchMode.externalApplication);
+                                        }
+                                      },
+                                      child: const Text('Reclamar', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
                 ),
               ],
             ),
