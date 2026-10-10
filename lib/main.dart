@@ -4,9 +4,78 @@ import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:intl/intl.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:workmanager/workmanager.dart';
 
-void main() {
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+    FlutterLocalNotificationsPlugin();
+
+const String periodicTaskName = "com.radargamer.checkDealsTask";
+
+@pragma('vm:entry-point')
+void callbackDispatcher() {
+  Workmanager().executeTask((task, inputData) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedStr = prefs.getString('followed_games_list');
+      if (savedStr == null) return Future.value(true);
+
+      final List followed = jsonDecode(savedStr);
+      for (var g in followed) {
+        final res = await http.get(Uri.parse('https://www.cheapshark.com/api/1.0/games?id=${g['gameID']}'));
+        if (res.statusCode == 200) {
+          final data = jsonDecode(res.body);
+          final deals = data['deals'] as List? ?? [];
+          if (deals.isNotEmpty) {
+            final best = deals.first;
+            final prevPrice = double.tryParse(g['salePrice'].toString()) ?? 0.0;
+            final currPrice = double.tryParse(best['price'].toString()) ?? 0.0;
+
+            if (currPrice < prevPrice && prevPrice > 0) {
+              const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+                'deals_channel',
+                'Alertas de Ofertas',
+                channelDescription: 'Notificaciones con sonido cuando bajan de precio los juegos seguidos',
+                importance: Importance.max,
+                priority: Priority.high,
+                playSound: true,
+                enableVibration: true,
+              );
+              const NotificationDetails platformDetails = NotificationDetails(android: androidDetails);
+              await flutterLocalNotificationsPlugin.show(
+                DateTime.now().millisecond,
+                '🔥 ¡Oferta en ${data['info']['title']}!',
+                'Bajó a \$${currPrice.toStringAsFixed(2)} en tienda oficial',
+                platformDetails,
+              );
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    return Future.value(true);
+  });
+}
+
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  const AndroidInitializationSettings initAndroid =
+      AndroidInitializationSettings('@mipmap/ic_launcher');
+  const InitializationSettings initSettings =
+      InitializationSettings(android: initAndroid);
+  await flutterLocalNotificationsPlugin.initialize(initSettings);
+
+  Workmanager().initialize(callbackDispatcher, isInDebugMode: false);
+  Workmanager().registerPeriodicTask(
+    "dealCheckTask",
+    periodicTaskName,
+    frequency: const Duration(hours: 4),
+    constraints: Constraints(
+      networkType: NetworkType.connected,
+    ),
+  );
+
   runApp(const RadarGamerApp());
 }
 
@@ -59,7 +128,6 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
   List<Map<String, dynamic>> _followedGames = [];
   List<Map<String, dynamic>> _deals = [];
   bool _isLoadingDeals = true;
-  String? _recentDealAlert;
 
   final NumberFormat _currencyFormat = NumberFormat('#,##0.00', 'es_VE');
 
@@ -67,7 +135,14 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+    _requestNotificationPermissions();
     _initializeData();
+  }
+
+  Future<void> _requestNotificationPermissions() async {
+    final androidImpl = flutterLocalNotificationsPlugin
+        .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+    await androidImpl?.requestNotificationsPermission();
   }
 
   Future<void> _initializeData() async {
@@ -189,10 +264,25 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
     setState(() => _isLoadingDeals = false);
   }
 
+  void _triggerNotificationWithSound(String title, String body) async {
+    const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+      'deals_channel',
+      'Alertas de Ofertas',
+      channelDescription: 'Canal principal para notificaciones de rebajas',
+      importance: Importance.max,
+      priority: Priority.high,
+      playSound: true,
+      enableVibration: true,
+    );
+    const NotificationDetails platformDetails = NotificationDetails(android: androidDetails);
+    await flutterLocalNotificationsPlugin.show(0, title, body, platformDetails);
+  }
+
   Future<void> _refreshFollowed() async {
     if (_followedGames.isEmpty) return;
     List<Map<String, dynamic>> updated = [];
-    String? newDropTitle;
+    String? droppedGameTitle;
+    double droppedPrice = 0.0;
 
     for (var g in _followedGames) {
       try {
@@ -209,7 +299,8 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
             final currPrice = double.tryParse(best['price'].toString()) ?? 0.0;
 
             if (currPrice < prevPrice && prevPrice > 0) {
-              newDropTitle = data['info']['title'];
+              droppedGameTitle = data['info']['title'];
+              droppedPrice = currPrice;
             }
 
             updated.add({
@@ -230,13 +321,39 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
       updated.add(g);
     }
 
-    setState(() {
-      _followedGames = updated;
-      if (newDropTitle != null) {
-        _recentDealAlert = '¡Oferta detectada en "$newDropTitle"! Nuevo precio más bajo.';
-      }
-    });
+    setState(() => _followedGames = updated);
     _saveFollowed();
+
+    if (droppedGameTitle != null && mounted) {
+      _triggerNotificationWithSound(
+        '🔥 ¡Oferta en $droppedGameTitle!',
+        'El juego bajó a \$$droppedPrice en tiendas oficiales.',
+      );
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          backgroundColor: const Color(0xFF141B26),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: const BorderSide(color: Color(0xFF00F5A0), width: 1.5),
+          ),
+          content: Row(
+            children: [
+              const Icon(Icons.notifications_active, color: Color(0xFF00F5A0)),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  '¡Nueva rebaja en "$droppedGameTitle" a \$$droppedPrice!',
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                ),
+              ),
+            ],
+          ),
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    }
   }
 
   Future<void> _handleRefreshAll() async {
@@ -319,8 +436,6 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
                     ],
                   ),
                   const SizedBox(height: 14),
-
-                  // Caja de Histórico Mínimo Registrado
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                     decoration: BoxDecoration(
@@ -348,7 +463,6 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
                       ],
                     ),
                   ),
-
                   const SizedBox(height: 16),
                   const Text(
                     'Precios por tienda disponible:',
@@ -466,35 +580,6 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
       ),
       body: Column(
         children: [
-          // Banner de Alerta de Nuevas Ofertas (si se detectó rebaja al refrescar)
-          if (_recentDealAlert != null)
-            Container(
-              margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              decoration: BoxDecoration(
-                color: const Color(0xFF00F5A0).withOpacity(0.15),
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: const Color(0xFF00F5A0)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.notifications_active, color: Color(0xFF00F5A0), size: 18),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _recentDealAlert!,
-                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Color(0xFF00F5A0)),
-                    ),
-                  ),
-                  GestureDetector(
-                    onTap: () => setState(() => _recentDealAlert = null),
-                    child: const Icon(Icons.close, color: Colors.white60, size: 16),
-                  ),
-                ],
-              ),
-            ),
-
-          // Banner de Tasa P2P limpia
           Container(
             margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -529,8 +614,6 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
               ],
             ),
           ),
-
-          // Selector de Región
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
             child: Row(
@@ -592,8 +675,6 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
               ],
             ),
           ),
-
-          // Pestañas
           TabBar(
             controller: _tabController,
             indicatorColor: const Color(0xFF00D2FF),
@@ -610,8 +691,6 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
               ),
             ],
           ),
-
-          // Contenido con Pull-to-Refresh
           Expanded(
             child: TabBarView(
               controller: _tabController,
