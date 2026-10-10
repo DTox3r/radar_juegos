@@ -13,11 +13,8 @@ jobs:
       - name: Descargar codigo del repositorio
         uses: actions/checkout@v4
 
-      - name: Respaldar configuracion propia de Android
-        run: |
-          mkdir -p /tmp/backup
-          cp android/app/src/main/AndroidManifest.xml /tmp/backup/AndroidManifest.xml
-          cp android/app/build.gradle /tmp/backup/build.gradle
+      - name: Respaldar AndroidManifest propio
+        run: cp android/app/src/main/AndroidManifest.xml /tmp/AndroidManifest.xml
 
       - name: Configurar Java 17
         uses: actions/setup-java@v4
@@ -34,10 +31,18 @@ jobs:
       - name: Generar scaffolding nativo de Android
         run: flutter create . --platforms=android --org com.radargamer --project-name game_deal_radar
 
-      - name: Restaurar configuracion garantizada
+      - name: Restaurar AndroidManifest garantizado
+        run: cp /tmp/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+
+      - name: Habilitar Desugaring en Gradle
         run: |
-          cp /tmp/backup/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
-          cp /tmp/backup/build.gradle android/app/build.gradle
+          if [ -f android/app/build.gradle.kts ]; then
+            sed -i '/compileOptions {/a \        isCoreLibraryDesugaringEnabled = true' android/app/build.gradle.kts
+            sed -i '/dependencies {/a \    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")' android/app/build.gradle.kts
+          elif [ -f android/app/build.gradle ]; then
+            sed -i '/compileOptions {/a \        coreLibraryDesugaringEnabled true' android/app/build.gradle
+            sed -i '/dependencies {/a \    coreLibraryDesugaring "com.android.tools:desugar_jdk_libs:2.0.4"' android/app/build.gradle
+          fi
 
       - name: Instalar dependencias
         run: flutter pub get
