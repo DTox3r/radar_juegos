@@ -16,16 +16,32 @@ const String periodicTaskName = "com.radargamer.checkDealsTask";
 void callbackDispatcher() {
   Workmanager().executeTask((task, inputData) async {
     try {
+      // Inicializar el plugin de notificaciones en el isolate de segundo plano
+      final FlutterLocalNotificationsPlugin bgNotificationsPlugin =
+          FlutterLocalNotificationsPlugin();
+      const AndroidInitializationSettings initAndroid =
+          AndroidInitializationSettings('@mipmap/ic_launcher');
+      const InitializationSettings initSettings =
+          InitializationSettings(android: initAndroid);
+      await bgNotificationsPlugin.initialize(initSettings);
+
       final prefs = await SharedPreferences.getInstance();
       final savedStr = prefs.getString('followed_games_list');
       if (savedStr == null) return Future.value(true);
 
       final List followed = jsonDecode(savedStr);
-      for (var g in followed) {
+      bool hadPriceChanges = false;
+
+      for (int i = 0; i < followed.length; i++) {
+        final g = followed[i];
         try {
+          final gameId = g['gameID'];
+          if (gameId == null) continue;
+
           final res = await http
-              .get(Uri.parse('https://www.cheapshark.com/api/1.0/games?id=${g['gameID']}'))
-              .timeout(const Duration(seconds: 10));
+              .get(Uri.parse('https://www.cheapshark.com/api/1.0/games?id=$gameId'))
+              .timeout(const Duration(seconds: 12));
+
           if (res.statusCode == 200) {
             final data = jsonDecode(res.body);
             final deals = data['deals'] as List? ?? [];
@@ -45,16 +61,26 @@ void callbackDispatcher() {
                   enableVibration: true,
                 );
                 const NotificationDetails platformDetails = NotificationDetails(android: androidDetails);
-                await flutterLocalNotificationsPlugin.show(
-                  DateTime.now().millisecond,
+                
+                final int notificationId = DateTime.now().millisecondsSinceEpoch.remainder(100000);
+                await bgNotificationsPlugin.show(
+                  notificationId,
                   '🔥 ¡Oferta en ${data['info']['title']}!',
                   'Bajó a \$${currPrice.toStringAsFixed(2)} en tienda oficial',
                   platformDetails,
                 );
+
+                // Actualizar el precio registrado para no repetir la alerta
+                followed[i]['salePrice'] = currPrice.toStringAsFixed(2);
+                hadPriceChanges = true;
               }
             }
           }
         } catch (_) {}
+      }
+
+      if (hadPriceChanges) {
+        await prefs.setString('followed_games_list', jsonEncode(followed));
       }
     } catch (_) {}
     return Future.value(true);
@@ -75,6 +101,7 @@ void main() async {
     "dealCheckTask",
     periodicTaskName,
     frequency: const Duration(hours: 4),
+    existingWorkPolicy: ExistingWorkPolicy.keep,
     constraints: Constraints(
       networkType: NetworkType.connected,
     ),
@@ -414,7 +441,12 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
       enableVibration: true,
     );
     const NotificationDetails platformDetails = NotificationDetails(android: androidDetails);
-    await flutterLocalNotificationsPlugin.show(0, title, body, platformDetails);
+    await flutterLocalNotificationsPlugin.show(
+      DateTime.now().millisecondsSinceEpoch.remainder(100000),
+      title,
+      body,
+      platformDetails,
+    );
   }
 
   Future<void> _refreshFollowed() async {
@@ -552,7 +584,6 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
                   ? _fetchSteamDetails(steamAppID)
                   : Future.value(null),
               builder: (context, steamSnapshot) {
-                // Generar y consolidar la lista de ofertas multitienda
                 List<Map<String, dynamic>> consolidatedDeals = [];
                 final steamData = steamSnapshot.data;
                 final bool hasSteamInRaw = rawDeals.any((d) => d['storeID'] == '1');
@@ -582,7 +613,6 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
                   });
                 }
 
-                // Ordenar todas las opciones de menor a mayor precio
                 consolidatedDeals.sort((a, b) {
                   final pA = double.tryParse(a['price'].toString()) ?? 0.0;
                   final pB = double.tryParse(b['price'].toString()) ?? 0.0;
@@ -638,7 +668,6 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
                           ),
                           const SizedBox(height: 14),
 
-                          // Histórico Mínimo Registrado
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                             decoration: BoxDecoration(
@@ -667,7 +696,6 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
                             ),
                           ),
 
-                          // Expansiones / DLCs (si existen en Steam)
                           if (steamAppID != null && steamAppID.isNotEmpty && steamAppID != 'null' && dlcIds.isNotEmpty) ...[
                             const SizedBox(height: 14),
                             Text(
