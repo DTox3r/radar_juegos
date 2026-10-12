@@ -11,12 +11,24 @@ final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
 
 const String periodicTaskName = "com.radargamer.checkDealsTask";
+const String dealsChannelId = "deals_channel";
+const String dealsChannelName = "Alertas de Ofertas";
+const String dealsChannelDesc = "Notificaciones cuando bajan de precio los juegos seguidos";
+
+const AndroidNotificationChannel dealsNotificationChannel = AndroidNotificationChannel(
+  dealsChannelId,
+  dealsChannelName,
+  description: dealsChannelDesc,
+  importance: Importance.max,
+  playSound: true,
+  enableVibration: true,
+);
 
 @pragma('vm:entry-point')
 void callbackDispatcher() {
   Workmanager().executeTask((task, inputData) async {
     try {
-      // Inicializar el plugin de notificaciones en el isolate de segundo plano
+      // 1. Inicializar notificaciones dentro del isolate en segundo plano
       final FlutterLocalNotificationsPlugin bgNotificationsPlugin =
           FlutterLocalNotificationsPlugin();
       const AndroidInitializationSettings initAndroid =
@@ -25,11 +37,22 @@ void callbackDispatcher() {
           InitializationSettings(android: initAndroid);
       await bgNotificationsPlugin.initialize(initSettings);
 
+      // 2. Crear formalmente el canal de notificaciones a nivel de sistema Android
+      final androidPlatformPlugin = bgNotificationsPlugin
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      if (androidPlatformPlugin != null) {
+        await androidPlatformPlugin.createNotificationChannel(dealsNotificationChannel);
+      }
+
+      // 3. Cargar juegos en seguimiento
       final prefs = await SharedPreferences.getInstance();
+      await prefs.reload(); // Forzar lectura de disco actualizada
       final savedStr = prefs.getString('followed_games_list');
-      if (savedStr == null) return Future.value(true);
+      if (savedStr == null || savedStr.isEmpty) return Future.value(true);
 
       final List followed = jsonDecode(savedStr);
+      if (followed.isEmpty) return Future.value(true);
+
       bool hadPriceChanges = false;
 
       for (int i = 0; i < followed.length; i++) {
@@ -40,7 +63,7 @@ void callbackDispatcher() {
 
           final res = await http
               .get(Uri.parse('https://www.cheapshark.com/api/1.0/games?id=$gameId'))
-              .timeout(const Duration(seconds: 12));
+              .timeout(const Duration(seconds: 15));
 
           if (res.statusCode == 200) {
             final data = jsonDecode(res.body);
@@ -50,19 +73,23 @@ void callbackDispatcher() {
               final prevPrice = double.tryParse(g['salePrice'].toString()) ?? 0.0;
               final currPrice = double.tryParse(best['price'].toString()) ?? 0.0;
 
+              // Si bajó de precio con respecto a la última consulta
               if (currPrice < prevPrice && prevPrice > 0) {
                 const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
-                  'deals_channel',
-                  'Alertas de Ofertas',
-                  channelDescription: 'Notificaciones con sonido cuando bajan de precio los juegos seguidos',
+                  dealsChannelId,
+                  dealsChannelName,
+                  channelDescription: dealsChannelDesc,
                   importance: Importance.max,
                   priority: Priority.high,
                   playSound: true,
                   enableVibration: true,
+                  icon: '@mipmap/ic_launcher',
                 );
-                const NotificationDetails platformDetails = NotificationDetails(android: androidDetails);
-                
-                final int notificationId = DateTime.now().millisecondsSinceEpoch.remainder(100000);
+                const NotificationDetails platformDetails =
+                    NotificationDetails(android: androidDetails);
+
+                final int notificationId =
+                    DateTime.now().millisecondsSinceEpoch.remainder(100000);
                 await bgNotificationsPlugin.show(
                   notificationId,
                   '🔥 ¡Oferta en ${data['info']['title']}!',
@@ -70,7 +97,6 @@ void callbackDispatcher() {
                   platformDetails,
                 );
 
-                // Actualizar el precio registrado para no repetir la alerta
                 followed[i]['salePrice'] = currPrice.toStringAsFixed(2);
                 hadPriceChanges = true;
               }
@@ -90,20 +116,37 @@ void callbackDispatcher() {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Inicializar plugin principal en primer plano
   const AndroidInitializationSettings initAndroid =
       AndroidInitializationSettings('@mipmap/ic_launcher');
   const InitializationSettings initSettings =
       InitializationSettings(android: initAndroid);
   await flutterLocalNotificationsPlugin.initialize(initSettings);
 
-  Workmanager().initialize(callbackDispatcher, isInDebugMode: false);
+  // Crear canal principal en Android
+  final androidImpl = flutterLocalNotificationsPlugin
+      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+  if (androidImpl != null) {
+    await androidImpl.createNotificationChannel(dealsNotificationChannel);
+  }
+
+  // Inicializar Workmanager
+  Workmanager().initialize(
+    callbackDispatcher,
+    isInDebugMode: false,
+  );
+
+  // Registrar tarea periódica cada 4 horas
   Workmanager().registerPeriodicTask(
-    "dealCheckTask",
+    "com.radargamer.dealCheckTask",
     periodicTaskName,
     frequency: const Duration(hours: 4),
     existingWorkPolicy: ExistingWorkPolicy.keep,
     constraints: Constraints(
       networkType: NetworkType.connected,
+      requiresBatteryNotLow: false,
+      requiresCharging: false,
+      requiresDeviceIdle: false,
     ),
   );
 
@@ -432,9 +475,9 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
 
   void _triggerNotificationWithSound(String title, String body) async {
     const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
-      'deals_channel',
-      'Alertas de Ofertas',
-      channelDescription: 'Canal principal para notificaciones de rebajas',
+      dealsChannelId,
+      dealsChannelName,
+      channelDescription: dealsChannelDesc,
       importance: Importance.max,
       priority: Priority.high,
       playSound: true,
@@ -1455,7 +1498,7 @@ class _SearchGameModalState extends State<SearchGameModal> {
                   return ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: ClipRRect(
-                      borderRadius: BorderRadius.circular(6),
+                      borderRadius: circular(6),
                       child: Image.network(
                         g['thumb'] ?? '',
                         width: 50,
