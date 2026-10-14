@@ -73,6 +73,18 @@ void callbackDispatcher() {
               final prevPrice = double.tryParse(g['salePrice'].toString()) ?? 0.0;
               final currPrice = double.tryParse(best['price'].toString()) ?? 0.0;
 
+              // Registrar en historial si hubo cambio de precio
+              if (currPrice != prevPrice) {
+                final history = (g['priceHistory'] as List? ?? []).cast<Map<String, dynamic>>();
+                history.add({
+                  'price': currPrice,
+                  'timestamp': DateTime.now().millisecondsSinceEpoch,
+                });
+                followed[i]['priceHistory'] = history;
+                followed[i]['salePrice'] = currPrice.toStringAsFixed(2);
+                hadPriceChanges = true;
+              }
+
               // Si bajó de precio con respecto a la última consulta
               if (currPrice < prevPrice && prevPrice > 0) {
                 const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
@@ -96,9 +108,6 @@ void callbackDispatcher() {
                   'Bajó a \$${currPrice.toStringAsFixed(2)} en tienda oficial',
                   platformDetails,
                 );
-
-                followed[i]['salePrice'] = currPrice.toStringAsFixed(2);
-                hadPriceChanges = true;
               }
             }
           }
@@ -201,6 +210,8 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
   Map<String, String> _storesMap = {};
 
   List<Map<String, dynamic>> _followedGames = [];
+  String _followedSortOption = 'price_asc'; // 'price_asc', 'price_desc', 'title', 'recent'
+
   List<Map<String, dynamic>> _deals = [];
   bool _isLoadingDeals = true;
 
@@ -261,6 +272,7 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
     if (mounted) {
       setState(() {
         _region = prefs.getString('saved_region') ?? 'LATAM';
+        _followedSortOption = prefs.getString('followed_sort_option') ?? 'price_asc';
         final cachedRate = prefs.getDouble('last_known_ves_rate');
         if (cachedRate != null && cachedRate > 0) {
           _vesRate = cachedRate;
@@ -268,7 +280,20 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
         }
         final savedFollowed = prefs.getString('followed_games_list');
         if (savedFollowed != null) {
-          _followedGames = List<Map<String, dynamic>>.from(jsonDecode(savedFollowed));
+          final List raw = jsonDecode(savedFollowed);
+          _followedGames = raw.map((item) {
+            final map = Map<String, dynamic>.from(item);
+            if (map['priceHistory'] == null) {
+              final initialPrice = double.tryParse(map['salePrice'].toString()) ?? 0.0;
+              map['priceHistory'] = [
+                {
+                  'price': initialPrice,
+                  'timestamp': DateTime.now().millisecondsSinceEpoch,
+                }
+              ];
+            }
+            return map;
+          }).toList();
         }
       });
     }
@@ -277,6 +302,12 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
   Future<void> _saveFollowed() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('followed_games_list', jsonEncode(_followedGames));
+  }
+
+  Future<void> _saveSortOption(String sortOpt) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('followed_sort_option', sortOpt);
+    if (mounted) setState(() => _followedSortOption = sortOpt);
   }
 
   Future<void> _saveRegion(String region) async {
@@ -525,6 +556,14 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
               droppedPrice = currentBestPrice;
             }
 
+            List<dynamic> history = List.from(g['priceHistory'] ?? []);
+            if (history.isEmpty || currentBestPrice != prevPrice) {
+              history.add({
+                'price': currentBestPrice,
+                'timestamp': DateTime.now().millisecondsSinceEpoch,
+              });
+            }
+
             return {
               'gameID': g['gameID'],
               'title': data['info']['title'],
@@ -536,6 +575,8 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
               'steamAppID': steamAppID,
               'historicalLow': cheapestEver?['price'] ?? best['price'],
               'historicalDate': cheapestEver?['date'] ?? 0,
+              'priceHistory': history,
+              'addedTimestamp': g['addedTimestamp'] ?? DateTime.now().millisecondsSinceEpoch,
             };
           }
         }
@@ -588,7 +629,60 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
     ]);
   }
 
-  void _showGameAllDealsModal(String gameID, String title, String thumb) {
+  Map<String, double> _calculateFollowedMinMax(List<dynamic>? history, double fallbackPrice) {
+    if (history == null || history.isEmpty) {
+      return {'min': fallbackPrice, 'max': fallbackPrice};
+    }
+    double minP = double.infinity;
+    double maxP = double.negativeInfinity;
+    for (var entry in history) {
+      final p = double.tryParse(entry['price'].toString()) ?? 0.0;
+      if (p > 0) {
+        if (p < minP) minP = p;
+        if (p > maxP) maxP = p;
+      }
+    }
+    if (minP == double.infinity) minP = fallbackPrice;
+    if (maxP == double.negativeInfinity) maxP = fallbackPrice;
+    return {'min': minP, 'max': maxP};
+  }
+
+  List<Map<String, dynamic>> _getSortedFollowedGames() {
+    List<Map<String, dynamic>> list = List.from(_followedGames);
+    switch (_followedSortOption) {
+      case 'price_asc':
+        list.sort((a, b) {
+          final pA = double.tryParse(a['salePrice'].toString()) ?? 0.0;
+          final pB = double.tryParse(b['salePrice'].toString()) ?? 0.0;
+          return pA.compareTo(pB);
+        });
+        break;
+      case 'price_desc':
+        list.sort((a, b) {
+          final pA = double.tryParse(a['salePrice'].toString()) ?? 0.0;
+          final pB = double.tryParse(b['salePrice'].toString()) ?? 0.0;
+          return pB.compareTo(pA);
+        });
+        break;
+      case 'title':
+        list.sort((a, b) {
+          final tA = (a['title'] ?? '').toString().toLowerCase();
+          final tB = (b['title'] ?? '').toString().toLowerCase();
+          return tA.compareTo(tB);
+        });
+        break;
+      case 'recent':
+        list.sort((a, b) {
+          final tA = a['addedTimestamp'] ?? 0;
+          final tB = b['addedTimestamp'] ?? 0;
+          return (tB as num).compareTo(tA as num);
+        });
+        break;
+    }
+    return list;
+  }
+
+  void _showGameAllDealsModal(String gameID, String title, String thumb, {List<dynamic>? priceHistory}) {
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF141B26),
@@ -738,6 +832,72 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
                               ],
                             ),
                           ),
+
+                          if (priceHistory != null && priceHistory.isNotEmpty) ...[
+                            const SizedBox(height: 14),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text(
+                                  'Historial de seguimiento:',
+                                  style: TextStyle(color: Color(0xFF00F5A0), fontSize: 13, fontWeight: FontWeight.bold),
+                                ),
+                                Text(
+                                  '${priceHistory.length} registros',
+                                  style: const TextStyle(color: Colors.white38, fontSize: 11),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Container(
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF0B0F17),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: const Color(0xFF1F293D)),
+                              ),
+                              child: Column(
+                                children: priceHistory.reversed.take(6).map((item) {
+                                  final p = double.tryParse(item['price'].toString()) ?? 0.0;
+                                  final ts = item['timestamp'] as int? ?? 0;
+                                  final dateStr = ts > 0
+                                      ? DateFormat('dd/MM/yyyy hh:mm a').format(DateTime.fromMillisecondsSinceEpoch(ts))
+                                      : 'Inicial';
+                                  final pVes = p * _vesRate;
+
+                                  return Padding(
+                                    padding: const EdgeInsets.symmetric(vertical: 3),
+                                    child: Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Text(
+                                          dateStr,
+                                          style: const TextStyle(color: Colors.white60, fontSize: 11),
+                                        ),
+                                        Row(
+                                          children: [
+                                            Text(
+                                              '\$${p.toStringAsFixed(2)}',
+                                              style: const TextStyle(
+                                                color: Color(0xFF00D2FF),
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 12,
+                                              ),
+                                            ),
+                                            const SizedBox(width: 6),
+                                            Text(
+                                              '(Bs. ${_currencyFormat.format(pVes)})',
+                                              style: const TextStyle(color: Colors.white38, fontSize: 10),
+                                            ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                }).toList(),
+                              ),
+                            ),
+                          ],
 
                           if (steamAppID != null && steamAppID.isNotEmpty && steamAppID != 'null' && dlcIds.isNotEmpty) ...[
                             const SizedBox(height: 14),
@@ -921,7 +1081,19 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
         onSelectGame: (game) {
           final exists = _followedGames.any((g) => g['gameID'] == game['gameID']);
           if (!exists) {
-            setState(() => _followedGames.add(game));
+            final double initialPrice = double.tryParse(game['salePrice'].toString()) ?? 0.0;
+            final now = DateTime.now().millisecondsSinceEpoch;
+            final gameWithHistory = {
+              ...game,
+              'addedTimestamp': now,
+              'priceHistory': [
+                {
+                  'price': initialPrice,
+                  'timestamp': now,
+                }
+              ],
+            };
+            setState(() => _followedGames.add(gameWithHistory));
             _saveFollowed();
           }
           Navigator.pop(ctx);
@@ -932,6 +1104,8 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
 
   @override
   Widget build(BuildContext context) {
+    final sortedFollowed = _getSortedFollowedGames();
+
     return Scaffold(
       appBar: AppBar(
         backgroundColor: const Color(0xFF0B0F17),
@@ -1109,27 +1283,91 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
                             ),
                           ],
                         )
-                      : ListView.builder(
-                          padding: const EdgeInsets.only(top: 8, bottom: 80, left: 12, right: 12),
-                          itemCount: _followedGames.length,
-                          itemBuilder: (ctx, i) {
-                            final game = _followedGames[i];
-                            return _buildGameCard(
-                              title: game['title'] ?? '',
-                              thumb: game['thumb'] ?? '',
-                              salePrice: double.tryParse(game['salePrice'].toString()) ?? 0.0,
-                              normalPrice: double.tryParse(game['normalPrice'].toString()) ?? 0.0,
-                              storeID: game['storeID']?.toString() ?? '1',
-                              dealID: game['dealID']?.toString() ?? '',
-                              gameID: game['gameID']?.toString() ?? '',
-                              historicalLow: double.tryParse(game['historicalLow']?.toString() ?? '0.0') ?? 0.0,
-                              isFollowed: true,
-                              onDelete: () {
-                                setState(() => _followedGames.removeAt(i));
-                                _saveFollowed();
-                              },
-                            );
-                          },
+                      : Column(
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  const Text(
+                                    'Ordenar por:',
+                                    style: TextStyle(color: Colors.white54, fontSize: 12),
+                                  ),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF141B26),
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(color: const Color(0xFF1F293D)),
+                                    ),
+                                    child: DropdownButtonHideUnderline(
+                                      child: DropdownButton<String>(
+                                        value: _followedSortOption,
+                                        isDense: true,
+                                        dropdownColor: const Color(0xFF141B26),
+                                        style: const TextStyle(color: Color(0xFF00D2FF), fontSize: 12, fontWeight: FontWeight.bold),
+                                        icon: const Icon(Icons.arrow_drop_down, color: Color(0xFF00D2FF), size: 18),
+                                        items: const [
+                                          DropdownMenuItem(
+                                            value: 'price_asc',
+                                            child: Text('Menor precio primero'),
+                                          ),
+                                          DropdownMenuItem(
+                                            value: 'price_desc',
+                                            child: Text('Mayor precio primero'),
+                                          ),
+                                          DropdownMenuItem(
+                                            value: 'title',
+                                            child: Text('Título (A-Z)'),
+                                          ),
+                                          DropdownMenuItem(
+                                            value: 'recent',
+                                            child: Text('Recientes'),
+                                          ),
+                                        ],
+                                        onChanged: (val) {
+                                          if (val != null) _saveSortOption(val);
+                                        },
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Expanded(
+                              child: ListView.builder(
+                                padding: const EdgeInsets.only(top: 4, bottom: 80, left: 12, right: 12),
+                                itemCount: sortedFollowed.length,
+                                itemBuilder: (ctx, i) {
+                                  final game = sortedFollowed[i];
+                                  final saleP = double.tryParse(game['salePrice'].toString()) ?? 0.0;
+                                  final minMax = _calculateFollowedMinMax(game['priceHistory'] as List?, saleP);
+
+                                  return _buildGameCard(
+                                    title: game['title'] ?? '',
+                                    thumb: game['thumb'] ?? '',
+                                    salePrice: saleP,
+                                    normalPrice: double.tryParse(game['normalPrice'].toString()) ?? 0.0,
+                                    storeID: game['storeID']?.toString() ?? '1',
+                                    dealID: game['dealID']?.toString() ?? '',
+                                    gameID: game['gameID']?.toString() ?? '',
+                                    historicalLow: double.tryParse(game['historicalLow']?.toString() ?? '0.0') ?? 0.0,
+                                    isFollowed: true,
+                                    followedMin: minMax['min'],
+                                    followedMax: minMax['max'],
+                                    priceHistory: game['priceHistory'] as List?,
+                                    onDelete: () {
+                                      setState(() {
+                                        _followedGames.removeWhere((g) => g['gameID'] == game['gameID']);
+                                      });
+                                      _saveFollowed();
+                                    },
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
                         ),
                 ),
                 RefreshIndicator(
@@ -1277,6 +1515,9 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
     required String gameID,
     required double historicalLow,
     required bool isFollowed,
+    double? followedMin,
+    double? followedMax,
+    List<dynamic>? priceHistory,
     VoidCallback? onDelete,
   }) {
     final storeName = _storesMap[storeID] ?? 'Tienda Autorizada';
@@ -1289,7 +1530,7 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
         borderRadius: BorderRadius.circular(16),
         onTap: () {
           if (gameID.isNotEmpty) {
-            _showGameAllDealsModal(gameID, title, thumb);
+            _showGameAllDealsModal(gameID, title, thumb, priceHistory: priceHistory);
           } else {
             final url = 'https://www.cheapshark.com/redirect?dealID=$dealID';
             launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
@@ -1340,11 +1581,23 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
                         fontWeight: FontWeight.w500,
                       ),
                     ),
-                    if (isFollowed && historicalLow > 0) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        'Mínimo hist.: \$$historicalLow',
-                        style: const TextStyle(color: Color(0xFF00F5A0), fontSize: 10),
+                    if (isFollowed) ...[
+                      const SizedBox(height: 3),
+                      Row(
+                        children: [
+                          if (followedMin != null)
+                            Text(
+                              'Min: \$${followedMin.toStringAsFixed(2)}',
+                              style: const TextStyle(color: Color(0xFF00F5A0), fontSize: 10, fontWeight: FontWeight.w500),
+                            ),
+                          if (followedMax != null) ...[
+                            const SizedBox(width: 8),
+                            Text(
+                              'Max: \$${followedMax.toStringAsFixed(2)}',
+                              style: const TextStyle(color: Color(0xFFFF5252), fontSize: 10, fontWeight: FontWeight.w500),
+                            ),
+                          ],
+                        ],
                       ),
                     ],
                   ],
@@ -1498,7 +1751,7 @@ class _SearchGameModalState extends State<SearchGameModal> {
                   return ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: ClipRRect(
-                      borderRadius: circular(6),
+                      borderRadius: BorderRadius.circular(6),
                       child: Image.network(
                         g['thumb'] ?? '',
                         width: 50,
