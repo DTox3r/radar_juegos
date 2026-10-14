@@ -150,7 +150,7 @@ void main() async {
     "com.radargamer.dealCheckTask",
     periodicTaskName,
     frequency: const Duration(hours: 4),
-    existingWorkPolicy: ExistingWorkPolicy.keep,
+    existingWorkPolicy: ExistingPeriodicWorkPolicy.keep,
     constraints: Constraints(
       networkType: NetworkType.connected,
       requiresBatteryNotLow: false,
