@@ -1078,25 +1078,33 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
       builder: (ctx) => SearchGameModal(
         storesMap: _storesMap,
         vesRate: _vesRate,
-        onSelectGame: (game) {
-          final exists = _followedGames.any((g) => g['gameID'] == game['gameID']);
-          if (!exists) {
-            final double initialPrice = double.tryParse(game['salePrice'].toString()) ?? 0.0;
-            final now = DateTime.now().millisecondsSinceEpoch;
-            final gameWithHistory = {
-              ...game,
-              'addedTimestamp': now,
-              'priceHistory': [
-                {
-                  'price': initialPrice,
-                  'timestamp': now,
-                }
-              ],
-            };
-            setState(() => _followedGames.add(gameWithHistory));
+        followedGameIDs: _followedGames.map((g) => g['gameID'].toString()).toSet(),
+        onToggleFollow: (game) {
+          final gameId = game['gameID'].toString();
+          if (game['remove'] == true) {
+            setState(() {
+              _followedGames.removeWhere((g) => g['gameID'].toString() == gameId);
+            });
             _saveFollowed();
+          } else {
+            final exists = _followedGames.any((g) => g['gameID'].toString() == gameId);
+            if (!exists) {
+              final double initialPrice = double.tryParse(game['salePrice'].toString()) ?? 0.0;
+              final now = DateTime.now().millisecondsSinceEpoch;
+              final gameWithHistory = {
+                ...game,
+                'addedTimestamp': now,
+                'priceHistory': [
+                  {
+                    'price': initialPrice,
+                    'timestamp': now,
+                  }
+                ],
+              };
+              setState(() => _followedGames.add(gameWithHistory));
+              _saveFollowed();
+            }
           }
-          Navigator.pop(ctx);
         },
       ),
     );
@@ -1651,13 +1659,15 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
 class SearchGameModal extends StatefulWidget {
   final Map<String, String> storesMap;
   final double vesRate;
-  final Function(Map<String, dynamic>) onSelectGame;
+  final Set<String> followedGameIDs;
+  final Function(Map<String, dynamic>) onToggleFollow;
 
   const SearchGameModal({
     super.key,
     required this.storesMap,
     required this.vesRate,
-    required this.onSelectGame,
+    required this.followedGameIDs,
+    required this.onToggleFollow,
   });
 
   @override
@@ -1668,7 +1678,14 @@ class _SearchGameModalState extends State<SearchGameModal> {
   final TextEditingController _controller = TextEditingController();
   List<Map<String, dynamic>> _results = [];
   bool _searching = false;
+  late Set<String> _localFollowedIDs;
   final NumberFormat _currencyFormat = NumberFormat('#,##0.00', 'es_VE');
+
+  @override
+  void initState() {
+    super.initState();
+    _localFollowedIDs = Set<String>.from(widget.followedGameIDs);
+  }
 
   @override
   void dispose() {
@@ -1703,12 +1720,39 @@ class _SearchGameModalState extends State<SearchGameModal> {
       padding: EdgeInsets.only(
         left: 16,
         right: 16,
-        top: 16,
+        top: 14,
         bottom: MediaQuery.of(context).viewInsets.bottom + 16,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 4,
+                    height: 16,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF00D2FF),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'Buscar Juegos',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                  ),
+                ],
+              ),
+              IconButton(
+                icon: const Icon(Icons.close, color: Colors.white60, size: 20),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
           TextField(
             controller: _controller,
             autofocus: true,
@@ -1737,60 +1781,91 @@ class _SearchGameModalState extends State<SearchGameModal> {
           else
             ConstrainedBox(
               constraints: BoxConstraints(
-                maxHeight: MediaQuery.of(context).size.height * 0.5,
+                maxHeight: MediaQuery.of(context).size.height * 0.55,
               ),
-              child: ListView.separated(
-                shrinkWrap: true,
-                itemCount: _results.length,
-                separatorBuilder: (_, __) => const Divider(color: Color(0xFF1F293D)),
-                itemBuilder: (ctx, i) {
-                  final g = _results[i];
-                  final price = double.tryParse(g['cheapest'].toString()) ?? 0.0;
-                  final priceVes = price * widget.vesRate;
+              child: _results.isEmpty
+                  ? const SizedBox(height: 40)
+                  : ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: _results.length,
+                      separatorBuilder: (_, __) => const Divider(color: Color(0xFF1F293D)),
+                      itemBuilder: (ctx, i) {
+                        final g = _results[i];
+                        final gameId = g['gameID']?.toString() ?? '';
+                        final price = double.tryParse(g['cheapest'].toString()) ?? 0.0;
+                        final priceVes = price * widget.vesRate;
+                        final isFollowed = _localFollowedIDs.contains(gameId);
 
-                  return ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: ClipRRect(
-                      borderRadius: BorderRadius.circular(6),
-                      child: Image.network(
-                        g['thumb'] ?? '',
-                        width: 50,
-                        height: 30,
-                        fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => const Icon(Icons.videogame_asset),
-                      ),
-                    ),
-                    title: Text(
-                      g['external'] ?? '',
-                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-                    ),
-                    subtitle: Text(
-                      'Mejor precio: \$$price (Bs. ${_currencyFormat.format(priceVes)})',
-                      style: const TextStyle(color: Color(0xFF00F5A0), fontSize: 11),
-                    ),
-                    trailing: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF00D2FF),
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      ),
-                      onPressed: () {
-                        widget.onSelectGame({
-                          'gameID': g['gameID'],
-                          'title': g['external'],
-                          'thumb': g['thumb'],
-                          'salePrice': g['cheapest'],
-                          'normalPrice': g['cheapest'],
-                          'storeID': '1',
-                          'dealID': g['cheapestDealID'],
-                          'historicalLow': g['cheapest'],
-                        });
+                        return ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: ClipRRect(
+                            borderRadius: BorderRadius.circular(6),
+                            child: Image.network(
+                              g['thumb'] ?? '',
+                              width: 50,
+                              height: 30,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, __, ___) => const Icon(Icons.videogame_asset),
+                            ),
+                          ),
+                          title: Text(
+                            g['external'] ?? '',
+                            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                          ),
+                          subtitle: Text(
+                            'Mejor precio: \$$price (Bs. ${_currencyFormat.format(priceVes)})',
+                            style: const TextStyle(color: Color(0xFF00F5A0), fontSize: 11),
+                          ),
+                          trailing: isFollowed
+                              ? OutlinedButton.icon(
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: const Color(0xFF00F5A0),
+                                    side: const BorderSide(color: Color(0xFF00F5A0)),
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                  ),
+                                  icon: const Icon(Icons.check, size: 14, color: Color(0xFF00F5A0)),
+                                  label: const Text(
+                                    'Siguiendo',
+                                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                                  ),
+                                  onPressed: () {
+                                    setState(() => _localFollowedIDs.remove(gameId));
+                                    widget.onToggleFollow({
+                                      'gameID': gameId,
+                                      'remove': true,
+                                    });
+                                  },
+                                )
+                              : ElevatedButton.icon(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF00D2FF),
+                                    foregroundColor: Colors.black,
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                  ),
+                                  icon: const Icon(Icons.add, size: 14, color: Colors.black),
+                                  label: const Text(
+                                    'Seguir',
+                                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                                  ),
+                                  onPressed: () {
+                                    setState(() => _localFollowedIDs.add(gameId));
+                                    widget.onToggleFollow({
+                                      'gameID': gameId,
+                                      'title': g['external'] ?? '',
+                                      'thumb': g['thumb'] ?? '',
+                                      'salePrice': g['cheapest'] ?? '0.0',
+                                      'normalPrice': g['cheapest'] ?? '0.0',
+                                      'storeID': '1',
+                                      'dealID': g['cheapestDealID'] ?? '',
+                                      'historicalLow': g['cheapest'] ?? '0.0',
+                                    });
+                                  },
+                                ),
+                        );
                       },
-                      child: const Text('Seguir', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
                     ),
-                  );
-                },
-              ),
             ),
         ],
       ),
