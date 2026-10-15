@@ -56,60 +56,94 @@ void callbackDispatcher() {
 
       bool hadPriceChanges = false;
 
-      for (int i = 0; i < followed.length; i++) {
-        final g = followed[i];
-        try {
-          final gameId = g['gameID'];
-          if (gameId == null) continue;
+      // Extraer IDs válidos para consulta por lote
+      final validGameIDs = followed
+          .map((g) => g['gameID']?.toString())
+          .where((id) => id != null && id.isNotEmpty)
+          .cast<String>()
+          .toList();
 
-          final res = await http
-              .get(Uri.parse('https://www.cheapshark.com/api/1.0/games?id=$gameId'))
-              .timeout(const Duration(seconds: 15));
+      if (validGameIDs.isEmpty) return Future.value(true);
+
+      const int batchSize = 25;
+      final Map<String, dynamic> allBatchData = {};
+
+      for (int i = 0; i < validGameIDs.length; i += batchSize) {
+        final chunk = validGameIDs.sublist(
+          i,
+          (i + batchSize > validGameIDs.length) ? validGameIDs.length : i + batchSize,
+        );
+
+        try {
+          final res = await http.get(
+            Uri.parse('https://www.cheapshark.com/api/1.0/games?ids=${chunk.join(',')}'),
+            headers: {'Accept': 'application/json', 'User-Agent': 'RadarGamerApp/1.0'},
+          ).timeout(const Duration(seconds: 15));
 
           if (res.statusCode == 200) {
-            final data = jsonDecode(res.body);
-            final deals = data['deals'] as List? ?? [];
-            if (deals.isNotEmpty) {
-              final best = deals.first;
-              final prevPrice = double.tryParse(g['salePrice'].toString()) ?? 0.0;
-              final currPrice = double.tryParse(best['price'].toString()) ?? 0.0;
+            final Map<String, dynamic> batchResult = jsonDecode(res.body);
+            allBatchData.addAll(batchResult);
+          }
+        } catch (_) {}
+      }
 
-              // Registrar en historial si hubo cambio de precio
-              if (currPrice != prevPrice) {
-                final history = (g['priceHistory'] as List? ?? []).cast<Map<String, dynamic>>();
-                history.add({
-                  'price': currPrice,
-                  'timestamp': DateTime.now().millisecondsSinceEpoch,
-                });
-                followed[i]['priceHistory'] = history;
-                followed[i]['salePrice'] = currPrice.toStringAsFixed(2);
-                hadPriceChanges = true;
-              }
+      for (int i = 0; i < followed.length; i++) {
+        final g = followed[i];
+        final gameId = g['gameID']?.toString();
+        if (gameId == null || !allBatchData.containsKey(gameId)) continue;
 
-              // Si bajó de precio con respecto a la última consulta
-              if (currPrice < prevPrice && prevPrice > 0) {
-                const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
-                  dealsChannelId,
-                  dealsChannelName,
-                  channelDescription: dealsChannelDesc,
-                  importance: Importance.max,
-                  priority: Priority.high,
-                  playSound: true,
-                  enableVibration: true,
-                  icon: '@mipmap/ic_launcher',
-                );
-                const NotificationDetails platformDetails =
-                    NotificationDetails(android: androidDetails);
+        try {
+          final gameData = allBatchData[gameId];
+          final deals = (gameData['deals'] as List? ?? []).cast<Map<String, dynamic>>();
+          final info = gameData['info'] as Map<String, dynamic>? ?? {};
 
-                final int notificationId =
-                    DateTime.now().millisecondsSinceEpoch.remainder(100000);
-                await bgNotificationsPlugin.show(
-                  notificationId,
-                  '🔥 ¡Oferta en ${data['info']['title']}!',
-                  'Bajó a \$${currPrice.toStringAsFixed(2)} en tienda oficial',
-                  platformDetails,
-                );
-              }
+          if (deals.isNotEmpty) {
+            deals.sort((a, b) {
+              final pA = double.tryParse(a['price'].toString()) ?? double.infinity;
+              final pB = double.tryParse(b['price'].toString()) ?? double.infinity;
+              return pA.compareTo(pB);
+            });
+
+            final best = deals.first;
+            final prevPrice = double.tryParse(g['salePrice'].toString()) ?? 0.0;
+            final currPrice = double.tryParse(best['price'].toString()) ?? 0.0;
+
+            // Registrar en historial si hubo cambio de precio
+            if (currPrice != prevPrice) {
+              final history = List<dynamic>.from(g['priceHistory'] ?? []);
+              history.add({
+                'price': currPrice,
+                'timestamp': DateTime.now().millisecondsSinceEpoch,
+              });
+              followed[i]['priceHistory'] = history;
+              followed[i]['salePrice'] = currPrice.toStringAsFixed(2);
+              hadPriceChanges = true;
+            }
+
+            // Si bajó de precio con respecto a la última consulta
+            if (currPrice < prevPrice && prevPrice > 0) {
+              const AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
+                dealsChannelId,
+                dealsChannelName,
+                channelDescription: dealsChannelDesc,
+                importance: Importance.max,
+                priority: Priority.high,
+                playSound: true,
+                enableVibration: true,
+                icon: '@mipmap/ic_launcher',
+              );
+              const NotificationDetails platformDetails =
+                  NotificationDetails(android: androidDetails);
+
+              final int notificationId =
+                  DateTime.now().millisecondsSinceEpoch.remainder(100000);
+              final title = info['title'] ?? g['title'] ?? 'Juego en seguimiento';
+              await bgNotificationsPlugin.show(
+                notificationId,
+                '🔥 ¡Oferta en $title!',
+                'Bajó a \$${currPrice.toStringAsFixed(2)} en tienda oficial',
+                platformDetails,
+              );
             }
           }
         } catch (_) {}
@@ -595,75 +629,107 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
     List<Map<String, dynamic>> updatedList = List.from(_followedGames);
     bool anyChanged = false;
 
-    // Refresco escalonado secuencial para no disparar ráfagas paralelas
-    for (int i = 0; i < updatedList.length; i++) {
-      if (!mounted) break;
-      final g = updatedList[i];
-      final gameId = g['gameID'];
-      if (gameId == null) continue;
+    // Extraer IDs válidos para consulta por lote (Batch Lookup oficial)
+    final validGameIDs = updatedList
+        .map((g) => g['gameID']?.toString())
+        .where((id) => id != null && id.isNotEmpty)
+        .cast<String>()
+        .toList();
 
-      if (i > 0) {
-        await Future.delayed(const Duration(milliseconds: 350));
-      }
+    if (validGameIDs.isEmpty) {
+      _isRefreshingFollowed = false;
+      return;
+    }
+
+    // Dividir en bloques de máximo 25 juegos (1 sola petición HTTP para hasta 25 juegos)
+    const int batchSize = 25;
+    final Map<String, dynamic> allBatchData = {};
+
+    for (int i = 0; i < validGameIDs.length; i += batchSize) {
+      final chunk = validGameIDs.sublist(
+        i,
+        (i + batchSize > validGameIDs.length) ? validGameIDs.length : i + batchSize,
+      );
 
       try {
         final res = await http.get(
-          Uri.parse('https://www.cheapshark.com/api/1.0/games?id=$gameId'),
+          Uri.parse('https://www.cheapshark.com/api/1.0/games?ids=${chunk.join(',')}'),
           headers: {'Accept': 'application/json', 'User-Agent': 'RadarGamerApp/1.0'},
-        ).timeout(const Duration(seconds: 8));
-
-        // Si responde 429, pausamos el ciclo para no empeorar la tasa
-        if (res.statusCode == 429) {
-          break;
-        }
+        ).timeout(const Duration(seconds: 12));
 
         if (res.statusCode == 200) {
-          final data = jsonDecode(res.body);
-          final deals = data['deals'] as List? ?? [];
-          final cheapestEver = data['cheapestPriceEver'] as Map<String, dynamic>?;
-          final steamAppID = data['info']?['steamAppID']?.toString();
+          final Map<String, dynamic> batchResult = jsonDecode(res.body);
+          allBatchData.addAll(batchResult);
+        }
+      } catch (_) {}
+    }
 
-          if (deals.isNotEmpty) {
-            var best = deals.first;
-            double currentBestPrice = double.tryParse(best['price'].toString()) ?? 0.0;
+    // Procesar cada juego con los datos obtenidos en la llamada por lote
+    for (int i = 0; i < updatedList.length; i++) {
+      final g = updatedList[i];
+      final gameId = g['gameID']?.toString();
+      if (gameId == null || !allBatchData.containsKey(gameId)) continue;
 
-            if (steamAppID != null && steamAppID.isNotEmpty && steamAppID != 'null') {
-              final steamData = await _fetchSteamDetails(steamAppID);
-              if (steamData != null && steamData['price'] > 0 && steamData['price'] < currentBestPrice) {
-                currentBestPrice = steamData['price'];
-              }
+      try {
+        final gameData = allBatchData[gameId];
+        final deals = (gameData['deals'] as List? ?? []).cast<Map<String, dynamic>>();
+        final info = gameData['info'] as Map<String, dynamic>? ?? {};
+        final steamAppID = info['steamAppID']?.toString();
+
+        if (deals.isNotEmpty) {
+          // Ordenar las ofertas para tomar el precio más bajo
+          deals.sort((a, b) {
+            final pA = double.tryParse(a['price'].toString()) ?? double.infinity;
+            final pB = double.tryParse(b['price'].toString()) ?? double.infinity;
+            return pA.compareTo(pB);
+          });
+
+          var best = deals.first;
+          double currentBestPrice = double.tryParse(best['price'].toString()) ?? 0.0;
+
+          // Si tiene Steam ID, verificar si el precio regional de Steam es menor
+          if (steamAppID != null && steamAppID.isNotEmpty && steamAppID != 'null') {
+            final steamData = await _fetchSteamDetails(steamAppID);
+            if (steamData != null && steamData['price'] > 0 && steamData['price'] < currentBestPrice) {
+              currentBestPrice = steamData['price'];
             }
-
-            final prevPrice = double.tryParse(g['salePrice'].toString()) ?? 0.0;
-            if (currentBestPrice < prevPrice && prevPrice > 0) {
-              droppedGameTitle = data['info']['title'];
-              droppedPrice = currentBestPrice;
-            }
-
-            List<dynamic> history = List.from(g['priceHistory'] ?? []);
-            if (history.isEmpty || currentBestPrice != prevPrice) {
-              history.add({
-                'price': currentBestPrice,
-                'timestamp': DateTime.now().millisecondsSinceEpoch,
-              });
-              anyChanged = true;
-            }
-
-            updatedList[i] = {
-              'gameID': g['gameID'],
-              'title': data['info']['title'],
-              'thumb': data['info']['thumb'],
-              'salePrice': currentBestPrice.toStringAsFixed(2),
-              'normalPrice': best['retailPrice'],
-              'storeID': best['storeID'],
-              'dealID': best['dealID'],
-              'steamAppID': steamAppID,
-              'historicalLow': cheapestEver?['price'] ?? best['price'],
-              'historicalDate': cheapestEver?['date'] ?? 0,
-              'priceHistory': history,
-              'addedTimestamp': g['addedTimestamp'] ?? DateTime.now().millisecondsSinceEpoch,
-            };
           }
+
+          final prevPrice = double.tryParse(g['salePrice'].toString()) ?? 0.0;
+          if (currentBestPrice < prevPrice && prevPrice > 0) {
+            droppedGameTitle = info['title'] ?? g['title'];
+            droppedPrice = currentBestPrice;
+          }
+
+          List<dynamic> history = List.from(g['priceHistory'] ?? []);
+          if (history.isEmpty || currentBestPrice != prevPrice) {
+            history.add({
+              'price': currentBestPrice,
+              'timestamp': DateTime.now().millisecondsSinceEpoch,
+            });
+            anyChanged = true;
+          }
+
+          // Mantener o actualizar el mínimo histórico
+          final oldHistLow = double.tryParse(g['historicalLow']?.toString() ?? '0.0') ?? 0.0;
+          final newHistLow = (oldHistLow <= 0 || (currentBestPrice > 0 && currentBestPrice < oldHistLow))
+              ? currentBestPrice
+              : oldHistLow;
+
+          updatedList[i] = {
+            'gameID': gameId,
+            'title': info['title'] ?? g['title'],
+            'thumb': info['thumb'] ?? g['thumb'],
+            'salePrice': currentBestPrice.toStringAsFixed(2),
+            'normalPrice': best['retailPrice'] ?? g['normalPrice'],
+            'storeID': best['storeID'] ?? g['storeID'],
+            'dealID': best['dealID'] ?? g['dealID'],
+            'steamAppID': steamAppID,
+            'historicalLow': newHistLow,
+            'historicalDate': g['historicalDate'] ?? 0,
+            'priceHistory': history,
+            'addedTimestamp': g['addedTimestamp'] ?? DateTime.now().millisecondsSinceEpoch,
+          };
         }
       } catch (_) {}
     }
