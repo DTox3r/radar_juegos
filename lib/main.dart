@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -835,66 +836,83 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
 
                           if (priceHistory != null && priceHistory.isNotEmpty) ...[
                             const SizedBox(height: 14),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                const Text(
-                                  'Historial de seguimiento:',
-                                  style: TextStyle(color: Color(0xFF00F5A0), fontSize: 13, fontWeight: FontWeight.bold),
+                            Theme(
+                              data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                              child: Container(
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFF0B0F17),
+                                  borderRadius: BorderRadius.circular(12),
+                                  border: Border.all(color: const Color(0xFF1F293D)),
                                 ),
-                                Text(
-                                  '${priceHistory.length} registros',
-                                  style: const TextStyle(color: Colors.white38, fontSize: 11),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 6),
-                            Container(
-                              padding: const EdgeInsets.all(10),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF0B0F17),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(color: const Color(0xFF1F293D)),
-                              ),
-                              child: Column(
-                                children: priceHistory.reversed.take(6).map((item) {
-                                  final p = double.tryParse(item['price'].toString()) ?? 0.0;
-                                  final ts = item['timestamp'] as int? ?? 0;
-                                  final dateStr = ts > 0
-                                      ? DateFormat('dd/MM/yyyy hh:mm a').format(DateTime.fromMillisecondsSinceEpoch(ts))
-                                      : 'Inicial';
-                                  final pVes = p * _vesRate;
-
-                                  return Padding(
-                                    padding: const EdgeInsets.symmetric(vertical: 3),
-                                    child: Row(
-                                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                      children: [
-                                        Text(
-                                          dateStr,
-                                          style: const TextStyle(color: Colors.white60, fontSize: 11),
-                                        ),
-                                        Row(
-                                          children: [
-                                            Text(
-                                              '\$${p.toStringAsFixed(2)}',
-                                              style: const TextStyle(
-                                                color: Color(0xFF00D2FF),
-                                                fontWeight: FontWeight.bold,
-                                                fontSize: 12,
-                                              ),
-                                            ),
-                                            const SizedBox(width: 6),
-                                            Text(
-                                              '(Bs. ${_currencyFormat.format(pVes)})',
-                                              style: const TextStyle(color: Colors.white38, fontSize: 10),
-                                            ),
-                                          ],
-                                        ),
-                                      ],
+                                child: ExpansionTile(
+                                  initiallyExpanded: false,
+                                  tilePadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+                                  leading: const Icon(Icons.history_toggle_off, color: Color(0xFF00F5A0), size: 20),
+                                  title: const Text(
+                                    'Historial de seguimiento',
+                                    style: TextStyle(
+                                      color: Color(0xFF00F5A0),
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.bold,
                                     ),
-                                  );
-                                }).toList(),
+                                  ),
+                                  subtitle: Text(
+                                    '${priceHistory.length} registros (toca para desplegar)',
+                                    style: const TextStyle(color: Colors.white38, fontSize: 11),
+                                  ),
+                                  iconColor: const Color(0xFF00F5A0),
+                                  collapsedIconColor: Colors.white54,
+                                  childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+                                  children: [
+                                    const Divider(color: Color(0xFF1F293D), height: 1),
+                                    const SizedBox(height: 8),
+                                    ConstrainedBox(
+                                      constraints: const BoxConstraints(maxHeight: 180),
+                                      child: ListView(
+                                        shrinkWrap: true,
+                                        padding: EdgeInsets.zero,
+                                        children: priceHistory.reversed.take(20).map((item) {
+                                          final p = double.tryParse(item['price'].toString()) ?? 0.0;
+                                          final ts = item['timestamp'] as int? ?? 0;
+                                          final dateStr = ts > 0
+                                              ? DateFormat('dd/MM/yyyy hh:mm a').format(DateTime.fromMillisecondsSinceEpoch(ts))
+                                              : 'Inicial';
+                                          final pVes = p * _vesRate;
+
+                                          return Padding(
+                                            padding: const EdgeInsets.symmetric(vertical: 4),
+                                            child: Row(
+                                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                              children: [
+                                                Text(
+                                                  dateStr,
+                                                  style: const TextStyle(color: Colors.white60, fontSize: 11),
+                                                ),
+                                                Row(
+                                                  children: [
+                                                    Text(
+                                                      '\$${p.toStringAsFixed(2)}',
+                                                      style: const TextStyle(
+                                                        color: Color(0xFF00D2FF),
+                                                        fontWeight: FontWeight.bold,
+                                                        fontSize: 12,
+                                                      ),
+                                                    ),
+                                                    const SizedBox(width: 6),
+                                                    Text(
+                                                      '(Bs. ${_currencyFormat.format(pVes)})',
+                                                      style: const TextStyle(color: Colors.white38, fontSize: 10),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ],
+                                            ),
+                                          );
+                                        }).toList(),
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                           ],
@@ -1678,6 +1696,10 @@ class _SearchGameModalState extends State<SearchGameModal> {
   final TextEditingController _controller = TextEditingController();
   List<Map<String, dynamic>> _results = [];
   bool _searching = false;
+  bool _hasSearched = false;
+  String? _errorMessage;
+  String _lastQuery = '';
+  Timer? _debounceTimer;
   late Set<String> _localFollowedIDs;
   final NumberFormat _currencyFormat = NumberFormat('#,##0.00', 'es_VE');
 
@@ -1689,29 +1711,85 @@ class _SearchGameModalState extends State<SearchGameModal> {
 
   @override
   void dispose() {
+    _debounceTimer?.cancel();
     _controller.dispose();
     super.dispose();
   }
 
+  String _normalizeQuery(String q) {
+    var s = q.trim();
+    return s
+        .replaceAll(RegExp(r'[áàäâã]'), 'a')
+        .replaceAll(RegExp(r'[éèëê]'), 'e')
+        .replaceAll(RegExp(r'[íìïî]'), 'i')
+        .replaceAll(RegExp(r'[óòöôõ]'), 'o')
+        .replaceAll(RegExp(r'[úùüû]'), 'u')
+        .replaceAll(RegExp(r'[ñ]'), 'n')
+        .replaceAll(RegExp(r'[ÁÀÄÂÃ]'), 'A')
+        .replaceAll(RegExp(r'[ÉÈËÊ]'), 'E')
+        .replaceAll(RegExp(r'[ÍÌÏÎ]'), 'I')
+        .replaceAll(RegExp(r'[ÓÒÖÔÕ]'), 'O')
+        .replaceAll(RegExp(r'[ÚÙÜÛ]'), 'U')
+        .replaceAll(RegExp(r'[Ñ]'), 'N');
+  }
+
   Future<void> _search(String query) async {
-    if (query.trim().isEmpty) return;
-    setState(() => _searching = true);
+    _debounceTimer?.cancel();
+    final cleanQuery = _normalizeQuery(query);
+    if (cleanQuery.isEmpty) return;
+
+    setState(() {
+      _searching = true;
+      _errorMessage = null;
+      _lastQuery = query.trim();
+    });
+
     try {
-      final res = await http
-          .get(Uri.parse('https://www.cheapshark.com/api/1.0/games?title=${Uri.encodeComponent(query)}&limit=15'))
-          .timeout(const Duration(seconds: 10));
+      final res = await http.get(
+        Uri.parse('https://www.cheapshark.com/api/1.0/games?title=${Uri.encodeComponent(cleanQuery)}&limit=25'),
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'RadarGamerApp/1.0',
+        },
+      ).timeout(const Duration(seconds: 12));
+
       if (res.statusCode == 200) {
         final List list = jsonDecode(res.body);
         if (mounted) {
           setState(() {
             _results = list.cast<Map<String, dynamic>>();
             _searching = false;
+            _hasSearched = true;
+          });
+        }
+        return;
+      } else {
+        if (mounted) {
+          setState(() {
+            _errorMessage = 'El servidor de ofertas respondió con código ${res.statusCode}.';
+            _searching = false;
+            _hasSearched = true;
           });
         }
         return;
       }
-    } catch (_) {}
-    if (mounted) setState(() => _searching = false);
+    } on TimeoutException {
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'El servidor tardó demasiado en responder. Revisa tu conexión o reintenta.';
+          _searching = false;
+          _hasSearched = true;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _errorMessage = 'No se pudo conectar con el servidor de ofertas. Revisa tu conexión.';
+          _searching = false;
+          _hasSearched = true;
+        });
+      }
+    }
   }
 
   @override
@@ -1756,12 +1834,30 @@ class _SearchGameModalState extends State<SearchGameModal> {
           TextField(
             controller: _controller,
             autofocus: true,
+            textInputAction: TextInputAction.search,
             decoration: InputDecoration(
-              hintText: 'Buscar juego (ej. Metal Gear, Far Cry)...',
+              hintText: 'Buscar juego (ej. Resident Evil, Doom)...',
               prefixIcon: const Icon(Icons.search, color: Color(0xFF00D2FF)),
-              suffixIcon: IconButton(
-                icon: const Icon(Icons.send, color: Color(0xFF00D2FF)),
-                onPressed: () => _search(_controller.text),
+              suffixIcon: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_controller.text.isNotEmpty)
+                    IconButton(
+                      icon: const Icon(Icons.clear, color: Colors.white38, size: 18),
+                      onPressed: () {
+                        _controller.clear();
+                        setState(() {
+                          _results = [];
+                          _hasSearched = false;
+                          _errorMessage = null;
+                        });
+                      },
+                    ),
+                  IconButton(
+                    icon: const Icon(Icons.arrow_forward, color: Color(0xFF00D2FF)),
+                    onPressed: () => _search(_controller.text),
+                  ),
+                ],
               ),
               filled: true,
               fillColor: const Color(0xFF0B0F17),
@@ -1770,102 +1866,184 @@ class _SearchGameModalState extends State<SearchGameModal> {
                 borderSide: const BorderSide(color: Color(0xFF1F293D)),
               ),
             ),
+            onChanged: (val) {
+              setState(() {});
+              _debounceTimer?.cancel();
+              if (val.trim().length >= 3) {
+                _debounceTimer = Timer(const Duration(milliseconds: 650), () {
+                  _search(val);
+                });
+              }
+            },
             onSubmitted: _search,
           ),
           const SizedBox(height: 12),
           if (_searching)
             const Padding(
-              padding: EdgeInsets.all(20),
-              child: CircularProgressIndicator(color: Color(0xFF00D2FF)),
+              padding: EdgeInsets.symmetric(vertical: 28),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(color: Color(0xFF00D2FF)),
+                  SizedBox(height: 12),
+                  Text(
+                    'Consultando ofertas en tiendas oficiales...',
+                    style: TextStyle(color: Colors.white54, fontSize: 12),
+                  ),
+                ],
+              ),
+            )
+          else if (_errorMessage != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.cloud_off, color: Color(0xFFFF5252), size: 36),
+                  const SizedBox(height: 8),
+                  Text(
+                    _errorMessage!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                  const SizedBox(height: 10),
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF1F293D),
+                      foregroundColor: const Color(0xFF00D2FF),
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                    icon: const Icon(Icons.refresh, size: 16),
+                    label: const Text('Reintentar', style: TextStyle(fontSize: 12)),
+                    onPressed: () => _search(_controller.text),
+                  ),
+                ],
+              ),
+            )
+          else if (_hasSearched && _results.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.search_off, color: Colors.white38, size: 38),
+                  const SizedBox(height: 8),
+                  Text(
+                    'No se encontraron resultados para "$_lastQuery"',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Consejo: Intenta con el título en inglés o una palabra clave más corta (ej. "Witcher" o "Batman").',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white38, fontSize: 11),
+                  ),
+                ],
+              ),
+            )
+          else if (!_hasSearched && _results.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.sports_esports_outlined, color: Colors.white24, size: 36),
+                  SizedBox(height: 8),
+                  Text(
+                    'Escribe el nombre de un juego para buscar ofertas.',
+                    style: TextStyle(color: Colors.white38, fontSize: 12),
+                  ),
+                ],
+              ),
             )
           else
             ConstrainedBox(
               constraints: BoxConstraints(
                 maxHeight: MediaQuery.of(context).size.height * 0.55,
               ),
-              child: _results.isEmpty
-                  ? const SizedBox(height: 40)
-                  : ListView.separated(
-                      shrinkWrap: true,
-                      itemCount: _results.length,
-                      separatorBuilder: (_, __) => const Divider(color: Color(0xFF1F293D)),
-                      itemBuilder: (ctx, i) {
-                        final g = _results[i];
-                        final gameId = g['gameID']?.toString() ?? '';
-                        final price = double.tryParse(g['cheapest'].toString()) ?? 0.0;
-                        final priceVes = price * widget.vesRate;
-                        final isFollowed = _localFollowedIDs.contains(gameId);
+              child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: _results.length,
+                separatorBuilder: (_, __) => const Divider(color: Color(0xFF1F293D)),
+                itemBuilder: (ctx, i) {
+                  final g = _results[i];
+                  final gameId = g['gameID']?.toString() ?? '';
+                  final price = double.tryParse(g['cheapest'].toString()) ?? 0.0;
+                  final priceVes = price * widget.vesRate;
+                  final isFollowed = _localFollowedIDs.contains(gameId);
 
-                        return ListTile(
-                          contentPadding: EdgeInsets.zero,
-                          leading: ClipRRect(
-                            borderRadius: BorderRadius.circular(6),
-                            child: Image.network(
-                              g['thumb'] ?? '',
-                              width: 50,
-                              height: 30,
-                              fit: BoxFit.cover,
-                              errorBuilder: (_, __, ___) => const Icon(Icons.videogame_asset),
-                            ),
-                          ),
-                          title: Text(
-                            g['external'] ?? '',
-                            style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-                          ),
-                          subtitle: Text(
-                            'Mejor precio: \$$price (Bs. ${_currencyFormat.format(priceVes)})',
-                            style: const TextStyle(color: Color(0xFF00F5A0), fontSize: 11),
-                          ),
-                          trailing: isFollowed
-                              ? OutlinedButton.icon(
-                                  style: OutlinedButton.styleFrom(
-                                    foregroundColor: const Color(0xFF00F5A0),
-                                    side: const BorderSide(color: Color(0xFF00F5A0)),
-                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                                  ),
-                                  icon: const Icon(Icons.check, size: 14, color: Color(0xFF00F5A0)),
-                                  label: const Text(
-                                    'Siguiendo',
-                                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
-                                  ),
-                                  onPressed: () {
-                                    setState(() => _localFollowedIDs.remove(gameId));
-                                    widget.onToggleFollow({
-                                      'gameID': gameId,
-                                      'remove': true,
-                                    });
-                                  },
-                                )
-                              : ElevatedButton.icon(
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: const Color(0xFF00D2FF),
-                                    foregroundColor: Colors.black,
-                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                                  ),
-                                  icon: const Icon(Icons.add, size: 14, color: Colors.black),
-                                  label: const Text(
-                                    'Seguir',
-                                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
-                                  ),
-                                  onPressed: () {
-                                    setState(() => _localFollowedIDs.add(gameId));
-                                    widget.onToggleFollow({
-                                      'gameID': gameId,
-                                      'title': g['external'] ?? '',
-                                      'thumb': g['thumb'] ?? '',
-                                      'salePrice': g['cheapest'] ?? '0.0',
-                                      'normalPrice': g['cheapest'] ?? '0.0',
-                                      'storeID': '1',
-                                      'dealID': g['cheapestDealID'] ?? '',
-                                      'historicalLow': g['cheapest'] ?? '0.0',
-                                    });
-                                  },
-                                ),
-                        );
-                      },
+                  return ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: Image.network(
+                        g['thumb'] ?? '',
+                        width: 50,
+                        height: 30,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => const Icon(Icons.videogame_asset),
+                      ),
                     ),
+                    title: Text(
+                      g['external'] ?? '',
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+                    ),
+                    subtitle: Text(
+                      'Mejor precio: \$$price (Bs. ${_currencyFormat.format(priceVes)})',
+                      style: const TextStyle(color: Color(0xFF00F5A0), fontSize: 11),
+                    ),
+                    trailing: isFollowed
+                        ? OutlinedButton.icon(
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: const Color(0xFF00F5A0),
+                              side: const BorderSide(color: Color(0xFF00F5A0)),
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                            ),
+                            icon: const Icon(Icons.check, size: 14, color: Color(0xFF00F5A0)),
+                            label: const Text(
+                              'Siguiendo',
+                              style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                            ),
+                            onPressed: () {
+                              setState(() => _localFollowedIDs.remove(gameId));
+                              widget.onToggleFollow({
+                                'gameID': gameId,
+                                'remove': true,
+                              });
+                            },
+                          )
+                        : ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF00D2FF),
+                              foregroundColor: Colors.black,
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                            ),
+                            icon: const Icon(Icons.add, size: 14, color: Colors.black),
+                            label: const Text(
+                              'Seguir',
+                              style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                            ),
+                            onPressed: () {
+                              setState(() => _localFollowedIDs.add(gameId));
+                              widget.onToggleFollow({
+                                'gameID': gameId,
+                                'title': g['external'] ?? '',
+                                'thumb': g['thumb'] ?? '',
+                                'salePrice': g['cheapest'] ?? '0.0',
+                                'normalPrice': g['cheapest'] ?? '0.0',
+                                'storeID': '1',
+                                'dealID': g['cheapestDealID'] ?? '',
+                                'historicalLow': g['cheapest'] ?? '0.0',
+                              });
+                            },
+                          ),
+                  );
+                },
+              ),
             ),
         ],
       ),
