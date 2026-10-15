@@ -242,27 +242,66 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
   }
 
   Future<void> _initializeData() async {
-    await _loadStores();
     await _loadLocalSettings();
+    await _loadStores();
     await Future.wait([
       _fetchBinanceRate(),
       _fetchDeals(),
       _fetchFreebies(),
-      _refreshFollowed(),
     ]);
+    // Refresco secuencial suave de juegos seguidos tras 1.5s de iniciar la app para evitar ráfagas
+    Future.delayed(const Duration(milliseconds: 1500), () {
+      if (mounted) _refreshFollowed();
+    });
   }
 
   Future<void> _loadStores() async {
+    final Map<String, String> defaultMap = {
+      '1': 'Steam',
+      '2': 'GamersGate',
+      '3': 'GreenManGaming',
+      '7': 'GOG',
+      '11': 'Humble Store',
+      '15': 'Fanatical',
+      '25': 'Epic Games Store',
+      '31': 'Blizzard Shop',
+    };
+
+    final prefs = await SharedPreferences.getInstance();
+    final cachedStr = prefs.getString('cached_stores_json');
+    final lastFetch = prefs.getInt('cached_stores_time') ?? 0;
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    if (cachedStr != null && cachedStr.isNotEmpty) {
+      try {
+        final Map<String, dynamic> decoded = jsonDecode(cachedStr);
+        final Map<String, String> map = decoded.map((k, v) => MapEntry(k, v.toString()));
+        if (mounted) setState(() => _storesMap = map);
+      } catch (_) {}
+    } else {
+      if (mounted) setState(() => _storesMap = defaultMap);
+    }
+
+    // Solo consultar a CheapShark si la caché tiene más de 7 días (o si no hay tiendas)
+    final bool isStale = (now - lastFetch) > (7 * 24 * 60 * 60 * 1000);
+    if (!isStale && _storesMap.isNotEmpty) return;
+
     try {
       final res = await http
-          .get(Uri.parse('https://www.cheapshark.com/api/1.0/stores'))
+          .get(
+            Uri.parse('https://www.cheapshark.com/api/1.0/stores'),
+            headers: {'Accept': 'application/json', 'User-Agent': 'RadarGamerApp/1.0'},
+          )
           .timeout(const Duration(seconds: 10));
+
       if (res.statusCode == 200) {
         final List list = jsonDecode(res.body);
         final Map<String, String> map = {};
         for (var s in list) {
           map[s['storeID'].toString()] = s['storeName'].toString();
         }
+        await prefs.setString('cached_stores_json', jsonEncode(map));
+        await prefs.setInt('cached_stores_time', now);
         if (mounted) setState(() => _storesMap = map);
       }
     } catch (_) {}
@@ -396,14 +435,35 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
   }
 
   Future<void> _fetchDeals() async {
-    if (mounted) setState(() => _isLoadingDeals = true);
+    final prefs = await SharedPreferences.getInstance();
+    // 1. Mostrar de inmediato el feed guardado en disco si existe
+    if (_deals.isEmpty) {
+      final cachedStr = prefs.getString('cached_deals_feed');
+      if (cachedStr != null && cachedStr.isNotEmpty) {
+        try {
+          final List list = jsonDecode(cachedStr);
+          if (mounted) {
+            setState(() {
+              _deals = list.cast<Map<String, dynamic>>();
+              _isLoadingDeals = false;
+            });
+          }
+        } catch (_) {}
+      }
+    }
+
     try {
       final res = await http
-          .get(Uri.parse(
-              'https://www.cheapshark.com/api/1.0/deals?storeID=1,2,3,7,11,25,31&pageSize=35&sortBy=Deal%20Rating'))
+          .get(
+            Uri.parse(
+                'https://www.cheapshark.com/api/1.0/deals?storeID=1,2,3,7,11,25,31&pageSize=35&sortBy=Deal%20Rating'),
+            headers: {'Accept': 'application/json', 'User-Agent': 'RadarGamerApp/1.0'},
+          )
           .timeout(const Duration(seconds: 10));
+
       if (res.statusCode == 200) {
         final List list = jsonDecode(res.body);
+        await prefs.setString('cached_deals_feed', res.body);
         if (mounted) {
           setState(() {
             _deals = list.cast<Map<String, dynamic>>();
@@ -524,16 +584,39 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
     );
   }
 
+  bool _isRefreshingFollowed = false;
+
   Future<void> _refreshFollowed() async {
-    if (_followedGames.isEmpty) return;
+    if (_followedGames.isEmpty || _isRefreshingFollowed) return;
+    _isRefreshingFollowed = true;
+
     String? droppedGameTitle;
     double droppedPrice = 0.0;
+    List<Map<String, dynamic>> updatedList = List.from(_followedGames);
+    bool anyChanged = false;
 
-    final futures = _followedGames.map((g) async {
+    // Refresco escalonado secuencial para no disparar ráfagas paralelas
+    for (int i = 0; i < updatedList.length; i++) {
+      if (!mounted) break;
+      final g = updatedList[i];
+      final gameId = g['gameID'];
+      if (gameId == null) continue;
+
+      if (i > 0) {
+        await Future.delayed(const Duration(milliseconds: 350));
+      }
+
       try {
-        final res = await http
-            .get(Uri.parse('https://www.cheapshark.com/api/1.0/games?id=${g['gameID']}'))
-            .timeout(const Duration(seconds: 8));
+        final res = await http.get(
+          Uri.parse('https://www.cheapshark.com/api/1.0/games?id=$gameId'),
+          headers: {'Accept': 'application/json', 'User-Agent': 'RadarGamerApp/1.0'},
+        ).timeout(const Duration(seconds: 8));
+
+        // Si responde 429, pausamos el ciclo para no empeorar la tasa
+        if (res.statusCode == 429) {
+          break;
+        }
+
         if (res.statusCode == 200) {
           final data = jsonDecode(res.body);
           final deals = data['deals'] as List? ?? [];
@@ -563,9 +646,10 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
                 'price': currentBestPrice,
                 'timestamp': DateTime.now().millisecondsSinceEpoch,
               });
+              anyChanged = true;
             }
 
-            return {
+            updatedList[i] = {
               'gameID': g['gameID'],
               'title': data['info']['title'],
               'thumb': data['info']['thumb'],
@@ -582,12 +666,13 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
           }
         }
       } catch (_) {}
-      return g;
-    });
+    }
 
-    final updated = await Future.wait(futures);
-    if (mounted) setState(() => _followedGames = updated);
-    await _saveFollowed();
+    if (mounted) {
+      setState(() => _followedGames = updatedList);
+      if (anyChanged) await _saveFollowed();
+    }
+    _isRefreshingFollowed = false;
 
     if (droppedGameTitle != null && mounted) {
       _triggerNotificationWithSound(
@@ -626,8 +711,10 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
       _fetchBinanceRate(),
       _fetchDeals(),
       _fetchFreebies(),
-      _refreshFollowed(),
     ]);
+    if (mounted) {
+      await _refreshFollowed();
+    }
   }
 
   Map<String, double> _calculateFollowedMinMax(List<dynamic>? history, double fallbackPrice) {
@@ -693,14 +780,41 @@ class _MainScreenState extends State<MainScreen> with SingleTickerProviderStateM
       ),
       builder: (ctx) {
         return FutureBuilder<http.Response>(
-          future: http
-              .get(Uri.parse('https://www.cheapshark.com/api/1.0/games?id=$gameID'))
-              .timeout(const Duration(seconds: 8)),
+          future: http.get(
+            Uri.parse('https://www.cheapshark.com/api/1.0/games?id=$gameID'),
+            headers: {'Accept': 'application/json', 'User-Agent': 'RadarGamerApp/1.0'},
+          ).timeout(const Duration(seconds: 8)),
           builder: (context, snapshot) {
-            if (!snapshot.hasData) {
+            if (!snapshot.hasData && !snapshot.hasError) {
               return const SizedBox(
                 height: 280,
                 child: Center(child: CircularProgressIndicator(color: Color(0xFF00D2FF))),
+              );
+            }
+
+            if (snapshot.hasError || (snapshot.hasData && snapshot.data!.statusCode != 200)) {
+              final is429 = snapshot.hasData && snapshot.data!.statusCode == 429;
+              return SizedBox(
+                height: 280,
+                child: Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(is429 ? Icons.timer_outlined : Icons.cloud_off, color: const Color(0xFFFF5252), size: 36),
+                        const SizedBox(height: 12),
+                        Text(
+                          is429
+                              ? 'El servidor de ofertas está temporalmente ocupado.\nPor favor espera unos segundos y vuelve a abrir.'
+                              : 'No se pudieron cargar las ofertas de este juego.\nVerifica tu conexión.',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(color: Colors.white70, fontSize: 13),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               );
             }
 
@@ -1693,6 +1807,8 @@ class SearchGameModal extends StatefulWidget {
 }
 
 class _SearchGameModalState extends State<SearchGameModal> {
+  static final Map<String, List<Map<String, dynamic>>> _searchCache = {};
+
   final TextEditingController _controller = TextEditingController();
   List<Map<String, dynamic>> _results = [];
   bool _searching = false;
@@ -1738,6 +1854,18 @@ class _SearchGameModalState extends State<SearchGameModal> {
     final cleanQuery = _normalizeQuery(query);
     if (cleanQuery.isEmpty) return;
 
+    // 1. Respuesta instantánea (0 ms) si ya se buscó en esta sesión
+    if (_searchCache.containsKey(cleanQuery)) {
+      setState(() {
+        _results = _searchCache[cleanQuery]!;
+        _searching = false;
+        _hasSearched = true;
+        _errorMessage = null;
+        _lastQuery = query.trim();
+      });
+      return;
+    }
+
     setState(() {
       _searching = true;
       _errorMessage = null;
@@ -1755,9 +1883,20 @@ class _SearchGameModalState extends State<SearchGameModal> {
 
       if (res.statusCode == 200) {
         final List list = jsonDecode(res.body);
+        final casted = list.cast<Map<String, dynamic>>();
+        _searchCache[cleanQuery] = casted;
         if (mounted) {
           setState(() {
-            _results = list.cast<Map<String, dynamic>>();
+            _results = casted;
+            _searching = false;
+            _hasSearched = true;
+          });
+        }
+        return;
+      } else if (res.statusCode == 429) {
+        if (mounted) {
+          setState(() {
+            _errorMessage = 'El servidor de ofertas está recibiendo muchas consultas en este momento. Espera unos segundos y vuelve a intentar.';
             _searching = false;
             _hasSearched = true;
           });
@@ -1870,7 +2009,7 @@ class _SearchGameModalState extends State<SearchGameModal> {
               setState(() {});
               _debounceTimer?.cancel();
               if (val.trim().length >= 3) {
-                _debounceTimer = Timer(const Duration(milliseconds: 650), () {
+                _debounceTimer = Timer(const Duration(milliseconds: 750), () {
                   _search(val);
                 });
               }
